@@ -1,0 +1,11 @@
+name = "lifeos"
+launcher = "lifeos"
+version = "8.761.0+pb.1"
+description = "LifeOS (danielmiessler/LifeOS) converted into an isolated Claude Code playbook"
+homepage = "https://github.com/danielmiessler/LifeOS"
+author = "LifeOS: Daniel Miessler; playbook converter: Ramazan Polat"
+
+[update]
+# Upstream's installer owns CLAUDE.md after conversion; the shipped one is only the bootstrap.
+preserve = ["CLAUDE.md"]
+migrate = "playbook/bin/migrate"

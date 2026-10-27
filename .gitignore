@@ -1,0 +1,12 @@
+# A converted playbook root holds LifeOS runtime next to these files; only the converter is tracked.
+/*
+!/.gitignore
+!/.playbook
+!/CLAUDE.md
+!/README.md
+!/AGENTS.md
+!/docs/
+!/examples/
+!/playbook/
+!/.github/
+/playbook/.candidate-*.json

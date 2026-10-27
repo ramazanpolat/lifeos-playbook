@@ -1,0 +1,5 @@
+#!/bin/sh
+# cpb update's migrate step: <from-version> <to-version> <install-dir>.
+# The update has already laid down the new pin; convert it in place.
+set -eu
+exec bun "$3/playbook/convert.ts" --root "$3" --migrate-from "$1" --migrate-to "$2"
