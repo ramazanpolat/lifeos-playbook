@@ -12,12 +12,13 @@ function escapeRe(s: string): string {
 /**
  * Every spelling upstream uses for the default config root, boundary-anchored:
  * `~/.claude`, `$HOME/.claude`, `${HOME}/.claude` and `<home>/.claude`, followed by
- * `/`, a quote, whitespace, `)`, `,`, `:`, `;` or end of string. `.claude-playbooks`,
- * `.claude.json` and `.claudeX` never match.
+ * `/`, a quote or backtick, whitespace, a closing bracket, `>`, `,`, `:`, `;`, a
+ * sentence-final `.`, or end of string. `.claude-playbooks`, `.claude.json` and
+ * `.claudeX` never match.
  */
 export function defaultRootPattern(home: string): RegExp {
   const prefixes = ["\\$\\{HOME\\}", "\\$HOME", "~", escapeRe(home.replace(/\/+$/, ""))];
-  return new RegExp(`(?:${prefixes.join("|")})/\\.claude(?=[/"'\\s),:;]|$)`, "g");
+  return new RegExp(`(?:${prefixes.join("|")})/\\.claude(?=[/"'\`\\s)\\]}>,:;]|\\.(?!\\w)|$)`, "g");
 }
 
 /** Rewrite every default-root spelling to the playbook root. */
@@ -94,4 +95,19 @@ export function pickComponents(wanted: readonly string[], offered: readonly stri
   const use = wanted.filter((c) => offered.includes(c));
   const missing = wanted.filter((c) => !offered.includes(c));
   return { use, missing };
+}
+
+/**
+ * Copy `keys` from the live settings into the user layer when the system layer does not
+ * define them (a system key would win the merge anyway). Returns the keys copied.
+ */
+export function preserveKeys(live: Record<string, unknown>, system: Record<string, unknown>, layer: Record<string, unknown>, keys: readonly string[]): string[] {
+  const copied: string[] = [];
+  for (const k of keys) {
+    if (!(k in live) || k in system) continue;
+    if (JSON.stringify(layer[k]) === JSON.stringify(live[k])) continue;
+    layer[k] = live[k];
+    copied.push(k);
+  }
+  return copied;
 }

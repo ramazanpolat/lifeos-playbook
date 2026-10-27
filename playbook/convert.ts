@@ -25,11 +25,11 @@
  *
  * Exit: 0 converted and clean, 1 failed, 2 refused (preflight), 3 converted but the audit found problems.
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { auditInside, diffSnapshots, snapshot } from "./lib/audit";
-import { coreServices, forceEnv, isBootstrap, pickComponents, playbookSection, rebaseDefaultRoot, upsertSection } from "./lib/patch";
+import { coreServices, forceEnv, isBootstrap, pickComponents, playbookSection, preserveKeys, rebaseDefaultRoot, upsertSection } from "./lib/patch";
 import { compareVersions, fetchCommit, readPin, stamp, verifyLocalSource } from "./lib/pin";
 import { run } from "./lib/sh";
 
@@ -38,6 +38,8 @@ const WANTED_COMPONENTS = ["tooltips", "spinnerverbs", "agents", "commands", "wo
 const USER_DATA = "user-data";
 const STATE_DIR = ".lifeos-playbook";
 const SKILL_BACKUPS_KEPT = 2;
+/** settings.json keys cpb writes: claudeMdExcludes keeps ~/.claude's CLAUDE.md out; model and agent from SET. */
+const CPB_KEYS = ["claudeMdExcludes", "model", "agent"];
 const BUN_MIN: [number, number] = [1, 2];
 
 class Refusal extends Error {}
@@ -93,6 +95,11 @@ function preflight(root: string, home: string): void {
   const [maj, min] = v.split(".").map(Number);
   if (maj < BUN_MIN[0] || (maj === BUN_MIN[0] && min < BUN_MIN[1])) throw new Refusal(`bun ${v} is too old; LifeOS needs ${BUN_MIN.join(".")}+`);
   run("git", ["--version"], { capture: true });
+  // node-pty (Pulse Desktop) has no Linux prebuild: upstream's DeployCore compiles it with node-gyp.
+  if (process.platform === "linux") {
+    const missing = ["make", "g++"].filter((t) => run("sh", ["-c", `command -v ${t}`], { capture: true, allowFail: true }).code !== 0);
+    if (missing.length) throw new Refusal(`LifeOS's installer compiles node-pty on Linux and needs ${missing.join(" and ")} (e.g. apt install build-essential)`);
+  }
 }
 
 /** Same rule InstallAll uses: VERSION, settings.json and a live LIFEOS/USER. */
@@ -144,6 +151,65 @@ function lock(stateDir: string): () => void {
   }
   writeFileSync(f, String(process.pid));
   return () => rmSync(f, { force: true });
+}
+
+interface InstallStep {
+  name: string;
+  status: string;
+  exit?: number;
+  reason?: string;
+  tail?: string;
+  report?: unknown;
+}
+
+/** Run InstallAll in JSON mode: one line per step, and the reason and output of a failed one. */
+function installAll(args: string[], root: string, env: Record<string, string | undefined>): void {
+  const r = run("bun", args, { cwd: root, env, capture: true, allowFail: true });
+  let report: { ok?: boolean; mode?: string; error?: string; steps?: InstallStep[] };
+  try {
+    report = JSON.parse(r.stdout);
+  } catch {
+    throw new Error(`InstallAll exited ${r.code} without a JSON report:\n${(r.stderr || r.stdout).trim().split("\n").slice(-20).join("\n")}`);
+  }
+  log(`InstallAll (${report.mode ?? "?"}): ${(report.steps ?? []).map((s) => `${s.name} ${s.status}`).join(", ")}`);
+  const failed = (report.steps ?? []).filter((s) => s.status === "failed");
+  for (const s of failed) {
+    log(`  ${s.name} failed (exit ${s.exit ?? "?"})${s.reason ? `: ${s.reason}` : ""}`);
+    const detail = s.tail ?? JSON.stringify(s.report ?? {}, null, 2);
+    for (const line of detail.trim().split("\n").slice(-30)) log(`    ${line}`);
+  }
+  if (r.code !== 0 || report.ok === false || failed.length) throw new Error(`InstallAll failed: ${report.error ?? `exit ${r.code}`}`);
+}
+
+/**
+ * The USER scaffold is copied from templates that spell the default root (`~/.claude/...`),
+ * and upstream code reads some of them back: ScaffoldUser follows `pulse_templates_dir` in
+ * CUSTOMIZATIONS/SKILLS/LifeOS/Config.md on upgrade. Rebase every text file except MEMORY/,
+ * which holds the user's own history.
+ */
+function rebaseUserTree(userTree: string, home: string, root: string): string[] {
+  const changed: string[] = [];
+  const walk = (dir: string) => {
+    for (const name of readdirSync(dir)) {
+      const p = join(dir, name);
+      const st = lstatSync(p);
+      if (st.isSymbolicLink()) continue;
+      if (st.isDirectory()) {
+        if (p !== join(userTree, "MEMORY") && name !== ".git" && name !== "node_modules") walk(p);
+        continue;
+      }
+      if (!st.isFile() || st.size > 1024 * 1024) continue;
+      const buf = readFileSync(p);
+      if (buf.includes(0)) continue;
+      const { text, count } = rebaseDefaultRoot(buf.toString("utf8"), home, root);
+      if (count) {
+        writeFileSync(p, text);
+        changed.push(p.slice(userTree.length + 1));
+      }
+    }
+  };
+  if (existsSync(userTree)) walk(userTree);
+  return changed;
 }
 
 function pruneSkillBackups(root: string): void {
@@ -240,12 +306,12 @@ function main(): number {
     const { use, missing } = pickComponents(WANTED_COMPONENTS, offered);
     if (missing.length) log(`release no longer offers: ${missing.join(", ")}`);
     log(`installing: components ${use.join(",") || "(none)"}; declining services ${declined.join(",") || "(none)"}`);
-    const installArgs = [join(skillRoot, "Tools/InstallAll.ts"), "--yes", "--config-root", root, "--skill-root", skillRoot];
+    const installArgs = [join(skillRoot, "Tools/InstallAll.ts"), "--yes", "--json", "--config-root", root, "--skill-root", skillRoot];
     // An empty --components deploys the default set, which includes components that write outside the root.
     if (!use.length) throw new Error(`release offers none of ${WANTED_COMPONENTS.join(",")}: upstream changed its components`);
     installArgs.push("--components", use.join(","));
     if (declined.length) installArgs.push("--decline-services", declined.join(","));
-    run("bun", installArgs, { cwd: root, env });
+    installAll(installArgs, root, env);
 
     // 5. Rebase what upstream leaves pointing at ~/.claude.
     const rootEnv = { LIFEOS_CONFIG_DIR: userData, LIFEOS_DIR: join(root, "LIFEOS") };
@@ -258,12 +324,24 @@ function main(): number {
       writeJson(p, obj);
       if (count) log(`${f}: rebased ${count} default-profile path(s)`);
     }
-    // MergeSettings rebuilds settings.json from settings.system.json + the user layer each session.
+    const userFiles = rebaseUserTree(join(userData, "USER"), home, root);
+    if (userFiles.length) log(`USER tree: rebased default-profile paths in ${userFiles.length} file(s): ${userFiles.join(", ")}`);
+    // MergeSettings rebuilds settings.json from settings.system.json + the user layer each
+    // session and keeps nothing else, so the keys cpb writes must live in the user layer too.
     const userLayerDir = join(userData, "USER", "CONFIG");
     if (existsSync(userLayerDir)) {
       const p = join(userLayerDir, "settings.user.json");
       const layer = readJson(p);
-      if (forceEnv(layer, rootEnv).length) writeJson(p, layer);
+      let changed = forceEnv(layer, rootEnv).length > 0;
+      const live = readJson(settingsPath);
+      const sysPath = existsSync(join(root, "settings.system.json")) ? join(root, "settings.system.json") : join(skillRoot, "install/settings.system.json");
+      const system = readJson(sysPath);
+      const kept = preserveKeys(live, system, layer, CPB_KEYS);
+      if (kept.length) {
+        changed = true;
+        log(`user settings layer: kept cpb key(s) ${kept.join(", ")} across the per-session rebuild`);
+      }
+      if (changed) writeJson(p, layer);
     }
 
     // 6. CLAUDE.md section.

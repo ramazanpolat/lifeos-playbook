@@ -8,6 +8,7 @@ import {
   forceEnv,
   isBootstrap,
   pickComponents,
+  preserveKeys,
   playbookSection,
   rebaseDefaultRoot,
   upsertSection,
@@ -34,6 +35,18 @@ describe("rebaseDefaultRoot", () => {
   test("matches at end of string and before punctuation", () => {
     expect(rebaseDefaultRoot("~/.claude", HOME, ROOT).text).toBe(ROOT);
     expect(rebaseDefaultRoot("a ~/.claude, b", HOME, ROOT).text).toBe(`a ${ROOT}, b`);
+  });
+
+  test("matches in markdown prose and shell defaults", () => {
+    expect(rebaseDefaultRoot("else `~/.claude`)", HOME, ROOT).text).toBe(`else \`${ROOT}\`)`);
+    expect(rebaseDefaultRoot("<path relative to ~/.claude>", HOME, ROOT).text).toBe(`<path relative to ${ROOT}>`);
+    expect(rebaseDefaultRoot("${X:-$HOME/.claude}", HOME, ROOT).text).toBe(`\${X:-${ROOT}}`);
+    expect(rebaseDefaultRoot("[~/.claude]", HOME, ROOT).text).toBe(`[${ROOT}]`);
+    expect(rebaseDefaultRoot("lives in ~/.claude.", HOME, ROOT).text).toBe(`lives in ${ROOT}.`);
+  });
+
+  test("a dot followed by a word is a different file", () => {
+    expect(rebaseDefaultRoot("~/.claude.json ~/.claude.bak/x", HOME, ROOT).count).toBe(0);
   });
 
   test("is idempotent", () => {
@@ -138,5 +151,32 @@ describe("diffSnapshots", () => {
       "/h/c": { exists: true as const, kind: "file", mtime: 1, size: 1 },
     };
     expect(diffSnapshots(before, after)).toEqual(["/h/a: created", "/h/b: modified", "/h/LaunchAgents: added com.lifeos.pulse.plist"]);
+  });
+});
+
+describe("watch: playbook version", () => {
+  test("restarts at pb.1 for a new upstream version, counts re-pins of the same one", async () => {
+    const { nextPlaybookVersion } = await import("../watch");
+    expect(nextPlaybookVersion("8.761.0+pb.1", "8.762.0")).toBe("8.762.0+pb.1");
+    expect(nextPlaybookVersion("8.761.0+pb.1", "8.761.0")).toBe("8.761.0+pb.2");
+    expect(nextPlaybookVersion("garbage", "8.761.0")).toBe("8.761.0+pb.1");
+  });
+
+  test("rewrites only the version line of .playbook", async () => {
+    const { setManifestVersion } = await import("../watch");
+    const src = 'name = "lifeos"\nversion = "8.761.0+pb.1"\n\n[update]\nmigrate = "playbook/bin/migrate"\n';
+    expect(setManifestVersion(src, "8.762.0+pb.1")).toBe(src.replace("8.761.0+pb.1", "8.762.0+pb.1"));
+    expect(() => setManifestVersion('name = "x"\n', "1.0.0+pb.1")).toThrow();
+  });
+});
+
+describe("preserveKeys", () => {
+  test("copies live keys the system layer lacks, once", () => {
+    const live = { claudeMdExcludes: ["/home/user/.claude/CLAUDE.md"], model: "opus", env: {} };
+    const system = { model: "sonnet" };
+    const layer: Record<string, unknown> = {};
+    expect(preserveKeys(live, system, layer, ["claudeMdExcludes", "model", "agent"])).toEqual(["claudeMdExcludes"]);
+    expect(layer).toEqual({ claudeMdExcludes: ["/home/user/.claude/CLAUDE.md"] });
+    expect(preserveKeys(live, system, layer, ["claudeMdExcludes", "model", "agent"])).toEqual([]);
   });
 });

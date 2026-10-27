@@ -73,6 +73,7 @@ assert_converted() { # assert_converted <root> <version> <label>
   check "$l: CLAUDE.md is upstream's, with one playbook section" test "$(grep -c 'lifeos-playbook:begin' "$root/CLAUDE.md")" = 1
   check "$l: bootstrap CLAUDE.md is gone" bash -c "! grep -q 'lifeos-playbook:bootstrap' '$root/CLAUDE.md'"
   check "$l: staging removed" test ! -e "$root/.lifeos-playbook/staging"
+  check "$l: USER skill configs carry no ~/.claude path" bash -c "! grep -lE '(~|\\\$HOME)/\\.claude(/|\\b)' '$root'/user-data/USER/CUSTOMIZATIONS/SKILLS/*/Config.md"
   local out; out="$(outside_root "$root")"
   check "$l: nothing written outside the root" test -z "$out"
   [ -z "$out" ] || echo "$out" | sed 's/^/        outside: /'
@@ -84,8 +85,9 @@ V="$(pin_version "$PIN")"
 echo "== fresh install of $V"
 ROOT="$HOME/.claude-playbooks/lifeos"
 stage_root "$ROOT" "$PIN"
-if convert "$ROOT" "$SANDBOX/fresh.log"; then check "fresh: convert exits 0" true; else check "fresh: convert exits 0" false; fi
-if [ -f "$ROOT/LIFEOS/VERSION" ]; then
+FRESH_OK=0
+if convert "$ROOT" "$SANDBOX/fresh.log"; then FRESH_OK=1; check "fresh: convert exits 0" true; else check "fresh: convert exits 0" false; fi
+if [ "$FRESH_OK" -eq 1 ]; then
   assert_converted "$ROOT" "$V" "fresh"
 
   echo "== rerun (idempotent; InstallAll takes its upgrade chain now)"
