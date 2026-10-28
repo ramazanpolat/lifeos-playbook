@@ -35,6 +35,10 @@ What the conversion does, and leaves out:
 - `~/.claude` paths in `settings.json` and `settings.system.json` rewritten to the playbook root;
 - an audit after every run: nothing inside points at `~/.claude`, nothing outside changed.
 
+The one thing that does land outside is package-manager cache: `bun install` and node-gyp
+use their usual cache directories (`~/.bun`, `~/.cache`, `~/Library/Caches`), shared with
+every other project on the machine. No LifeOS state or configuration goes there.
+
 ## Layout
 
 | Path | What |

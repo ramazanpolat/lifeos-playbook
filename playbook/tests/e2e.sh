@@ -59,10 +59,12 @@ convert() { # convert <root> <log>
   return $code
 }
 
-# Paths under the sandbox HOME that are not the playbook root. Package-manager caches are allowed.
+# Paths under the sandbox HOME that are not the playbook root. Package-manager caches are
+# allowed: bun and node-gyp keep theirs in ~/.bun and ~/.cache on Linux, ~/Library/Caches on macOS.
 outside_root() { # outside_root <root>
-  find "$HOME" -mindepth 1 \( -path "$1" -o -path "$HOME/.bun" -o -path "$HOME/.cache" -o -path "$HOME/.npm" \) -prune -o -print \
-    | grep -v -x -F "$HOME/.claude-playbooks" || true
+  find "$HOME" -mindepth 1 \( -path "$1" -o -path "$HOME/.bun" -o -path "$HOME/.cache" -o -path "$HOME/.npm" \
+      -o -path "$HOME/Library/Caches/bun" -o -path "$HOME/Library/Caches/node-gyp" \) -prune -o -print \
+    | grep -v -x -F -e "$HOME/.claude-playbooks" -e "$HOME/Library" -e "$HOME/Library/Caches" || true
 }
 
 assert_converted() { # assert_converted <root> <version> <label>
