@@ -178,6 +178,8 @@ function installAll(args: string[], root: string, env: Record<string, string | u
     const detail = s.tail ?? JSON.stringify(s.report ?? {}, null, 2);
     for (const line of detail.trim().split("\n").slice(-30)) log(`    ${line}`);
   }
+  if (failed.some((s) => /timed out/.test(s.reason ?? "")))
+    log("  an upstream step hit its time limit, usually a stalled `bun install` on a cold cache; the conversion is safe to run again once it has exited");
   if (r.code !== 0 || report.ok === false || failed.length) throw new Error(`InstallAll failed: ${report.error ?? `exit ${r.code}`}`);
 }
 
