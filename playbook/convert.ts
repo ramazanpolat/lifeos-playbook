@@ -29,7 +29,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSy
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { auditInside, diffSnapshots, snapshot } from "./lib/audit";
-import { coreServices, forceEnv, isBootstrap, pickComponents, playbookSection, preserveKeys, rebaseDefaultRoot, upsertSection } from "./lib/patch";
+import { coreServices, forceEnv, isBootstrap, pickComponents, playbookSection, preserveKeys, rebaseDefaultRoot, rebaseSettings, upsertSection } from "./lib/patch";
 import { compareVersions, fetchCommit, readPin, stamp, verifyLocalSource } from "./lib/pin";
 import { run } from "./lib/sh";
 
@@ -187,11 +187,12 @@ function installAll(args: string[], root: string, env: Record<string, string | u
  * CUSTOMIZATIONS/SKILLS/LifeOS/Config.md on upgrade. Rebase every text file except MEMORY/,
  * which holds the user's own history.
  */
-function rebaseUserTree(userTree: string, home: string, root: string): string[] {
+function rebaseUserTree(userTree: string, home: string, root: string, skip: string[] = []): string[] {
   const changed: string[] = [];
   const walk = (dir: string) => {
     for (const name of readdirSync(dir)) {
       const p = join(dir, name);
+      if (skip.includes(p)) continue;
       const st = lstatSync(p);
       if (st.isSymbolicLink()) continue;
       if (st.isDirectory()) {
@@ -318,21 +319,21 @@ function main(): number {
     for (const f of ["settings.json", "settings.system.json"]) {
       const p = join(root, f);
       if (!existsSync(p)) continue;
-      const { text, count } = rebaseDefaultRoot(readFileSync(p, "utf8"), home, root);
-      const obj = JSON.parse(text);
+      const { settings: obj, count } = rebaseSettings(readJson(p), home, root);
       forceEnv(obj, rootEnv);
       writeJson(p, obj);
       if (count) log(`${f}: rebased ${count} default-profile path(s)`);
     }
-    const userFiles = rebaseUserTree(join(userData, "USER"), home, root);
+    const userLayer = join(userData, "USER", "CONFIG", "settings.user.json");
+    const userFiles = rebaseUserTree(join(userData, "USER"), home, root, [userLayer]);
     if (userFiles.length) log(`USER tree: rebased default-profile paths in ${userFiles.length} file(s): ${userFiles.join(", ")}`);
     // MergeSettings rebuilds settings.json from settings.system.json + the user layer each
     // session and keeps nothing else, so the keys cpb writes must live in the user layer too.
-    const userLayerDir = join(userData, "USER", "CONFIG");
-    if (existsSync(userLayerDir)) {
-      const p = join(userLayerDir, "settings.user.json");
-      const layer = readJson(p);
-      let changed = forceEnv(layer, rootEnv).length > 0;
+    if (existsSync(dirname(userLayer))) {
+      const p = userLayer;
+      const rebased = rebaseSettings(readJson(p), home, root);
+      const layer = rebased.settings;
+      let changed = forceEnv(layer, rootEnv).length > 0 || rebased.count > 0;
       const live = readJson(settingsPath);
       const sysPath = existsSync(join(root, "settings.system.json")) ? join(root, "settings.system.json") : join(skillRoot, "install/settings.system.json");
       const system = readJson(sysPath);

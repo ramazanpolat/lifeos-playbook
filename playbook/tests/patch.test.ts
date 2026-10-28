@@ -9,6 +9,7 @@ import {
   isBootstrap,
   pickComponents,
   preserveKeys,
+  rebaseSettings,
   playbookSection,
   rebaseDefaultRoot,
   upsertSection,
@@ -178,5 +179,21 @@ describe("preserveKeys", () => {
     expect(preserveKeys(live, system, layer, ["claudeMdExcludes", "model", "agent"])).toEqual(["claudeMdExcludes"]);
     expect(layer).toEqual({ claudeMdExcludes: ["/home/user/.claude/CLAUDE.md"] });
     expect(preserveKeys(live, system, layer, ["claudeMdExcludes", "model", "agent"])).toEqual([]);
+  });
+});
+
+describe("rebaseSettings", () => {
+  test("rebases everything but cpb's claudeMdExcludes", () => {
+    const settings = {
+      claudeMdExcludes: [`${HOME}/.claude/**`],
+      env: { LIFEOS_DIR: "$HOME/.claude/LIFEOS" },
+      permissions: { allow: ["Edit(~/.claude/**)"] },
+    };
+    const { settings: out, count } = rebaseSettings(settings, HOME, ROOT);
+    expect(count).toBe(2);
+    expect(out.claudeMdExcludes).toEqual([`${HOME}/.claude/**`]);
+    expect(out.env).toEqual({ LIFEOS_DIR: `${ROOT}/LIFEOS` });
+    expect(out.permissions).toEqual({ allow: [`Edit(${ROOT}/**)`] });
+    expect(settings.env.LIFEOS_DIR).toBe("$HOME/.claude/LIFEOS"); // input untouched
   });
 });

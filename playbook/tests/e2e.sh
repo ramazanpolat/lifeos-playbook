@@ -108,7 +108,10 @@ if [ -n "$FROM_PIN" ] && [ "$(json "$FROM_PIN" j.commit)" = "$(json "$PIN" j.com
 elif [ -n "$FROM_PIN" ]; then
   FV="$(pin_version "$FROM_PIN")"
   echo "== upgrade $FV -> $V"
-  UP="$HOME/.claude-playbooks/lifeos-upgrade"
+  # A HOME of its own: the fresh install above would otherwise count as an outside-root write.
+  export HOME="$SANDBOX/home-upgrade"
+  mkdir -p "$HOME"
+  UP="$HOME/.claude-playbooks/lifeos"
   stage_root "$UP" "$FROM_PIN"
   if convert "$UP" "$SANDBOX/upgrade-from.log"; then
     check "upgrade: $FV converts" true

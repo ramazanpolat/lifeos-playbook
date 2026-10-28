@@ -25,6 +25,8 @@ check() {
   else FAIL=$((FAIL + 1)); echo "  FAIL  $name"; fi
 }
 json() { bun -e "const j=JSON.parse(require('fs').readFileSync('$1','utf8')); console.log($2)"; }
+# cpb's exclusion keeps naming ~/.claude, and nothing inside the playbook is excluded.
+excludes_ok() { bun -e "const e=require('$ROOT/settings.json').claudeMdExcludes ?? []; process.exit(e.includes('$HOME/.claude/**') && !e.some((x) => x.startsWith('$ROOT')) ? 0 : 1)"; }
 git_c() { git -C "$SRC" -c user.name=cpb-test -c user.email=cpb-test@example.invalid "$@"; }
 
 echo "cpb.sh: sandbox $SANDBOX ($(cpb --version))"
@@ -41,12 +43,14 @@ cpb CREATE PLAYBOOK lifeos FROM "file://$SRC" 2>&1 | sed 's/^/        /'
 check "install: playbook root exists with the converter" test -f "$ROOT/playbook/convert.ts"
 check "install: bootstrap CLAUDE.md in place" grep -q 'lifeos-playbook:bootstrap' "$ROOT/CLAUDE.md"
 check "install: .playbook declares the migrate step" grep -q 'migrate = "playbook/bin/migrate"' "$ROOT/.playbook"
+check "install: cpb wrote its ~/.claude/** exclusion" excludes_ok
 
 echo "== convert"
 code=0
 bun "$ROOT/playbook/convert.ts" >"$SANDBOX/convert.log" 2>&1 || code=$?
 tail -n 6 "$SANDBOX/convert.log" | sed 's/^/        /'
 check "convert: exits 0" test "$code" = 0
+check "convert: claudeMdExcludes still names ~/.claude/** only" excludes_ok
 FIRST="$(json "$ROOT/.lifeos-playbook/state.json" j.converted)"
 
 echo "== change the source, then cpb update"
@@ -64,6 +68,7 @@ check "update: migrate hook re-ran the converter" test "$(json "$ROOT/.lifeos-pl
 check "update: converter ran in upgrade mode" test "$(json "$ROOT/.lifeos-playbook/state.json" j.mode)" = upgrade
 check "update: audit clean" test "$(json "$ROOT/.lifeos-playbook/state.json" 'j.problems.length')" = 0
 check "update: CLAUDE.md kept (upstream's, not the bootstrap)" bash -c "! grep -q 'lifeos-playbook:bootstrap' '$ROOT/CLAUDE.md' && grep -q 'lifeos-playbook:begin' '$ROOT/CLAUDE.md'"
+check "update: claudeMdExcludes still names ~/.claude/** only" excludes_ok
 check "update: settings.json kept its data home" test "$(json "$ROOT/settings.json" j.env.LIFEOS_CONFIG_DIR)" = "$ROOT/user-data"
 
 echo "== the per-session settings rebuild (upstream's SessionStart MergeSettings hook)"
@@ -73,7 +78,7 @@ code=0
 (cd "$ROOT" && CLAUDE_CONFIG_DIR="$ROOT" sh -c "$HOOK") >"$SANDBOX/rebuild.log" 2>&1 || code=$?
 tail -n 3 "$SANDBOX/rebuild.log" | sed 's/^/        /'
 check "rebuild: hook exits 0" test "$code" = 0
-check "rebuild: cpb's claudeMdExcludes survives" test "$(json "$ROOT/settings.json" '(j.claudeMdExcludes ?? []).length')" -gt 0
+check "rebuild: cpb's claudeMdExcludes survives unchanged" excludes_ok
 check "rebuild: data home still inside the root" test "$(json "$ROOT/settings.json" j.env.LIFEOS_CONFIG_DIR)" = "$ROOT/user-data"
 check "rebuild: no ~/.claude paths reappear" bash -c "! grep -qE '(~|\\\$HOME)/\\.claude(/|\"|\$)' '$ROOT/settings.json'"
 

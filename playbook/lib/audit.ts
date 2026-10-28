@@ -1,6 +1,6 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
-import { findDefaultRoot } from "./patch";
+import { findDefaultRoot, withoutExempt } from "./patch";
 
 /**
  * Places upstream's installer chain is known to write outside its config root
@@ -92,8 +92,12 @@ export function auditInside(root: string, home: string, userData: string): strin
   for (const f of ["settings.json", "settings.system.json"]) {
     const p = join(root, f);
     if (!existsSync(p)) continue;
-    const left = findDefaultRoot(readFileSync(p, "utf8"), home);
+    const doc = JSON.parse(readFileSync(p, "utf8")) as Record<string, unknown>;
+    const left = findDefaultRoot(JSON.stringify(withoutExempt(doc)), home);
     if (left.length) problems.push(`${f}: ${left.length} path(s) still point at the default profile (${[...new Set(left)].join(", ")})`);
+    // cpb's exclusion must keep naming ~/.claude; an entry inside the root hides LifeOS's own CLAUDE.md files.
+    const excludes = Array.isArray(doc.claudeMdExcludes) ? (doc.claudeMdExcludes as unknown[]).map(String) : [];
+    for (const e of excludes) if (under(e.replace(/\/\*\*$/, ""), root)) problems.push(`${f}: claudeMdExcludes entry ${e} hides the playbook's own CLAUDE.md`);
   }
   const settings = JSON.parse(readFileSync(join(root, "settings.json"), "utf8")) as Record<string, any>;
   if (settings.env?.LIFEOS_CONFIG_DIR !== userData) problems.push(`settings.json: env.LIFEOS_CONFIG_DIR is ${settings.env?.LIFEOS_CONFIG_DIR}, expected ${userData}`);

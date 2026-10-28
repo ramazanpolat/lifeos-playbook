@@ -111,3 +111,25 @@ export function preserveKeys(live: Record<string, unknown>, system: Record<strin
   }
   return copied;
 }
+
+/**
+ * Settings keys whose paths name the default profile on purpose. cpb's claudeMdExcludes
+ * holds `<home>/.claude/**` to keep ~/.claude's CLAUDE.md out of the playbook; rebasing it
+ * would exclude the playbook's own CLAUDE.md files instead.
+ */
+export const REBASE_EXEMPT_KEYS = ["claudeMdExcludes"] as const;
+
+/** A copy of a settings object without the exempt keys (for rebasing and auditing). */
+export function withoutExempt(settings: Record<string, unknown>): Record<string, unknown> {
+  const copy = { ...settings };
+  for (const k of REBASE_EXEMPT_KEYS) delete copy[k];
+  return copy;
+}
+
+/** Rebase a settings document, leaving the exempt keys exactly as they were. */
+export function rebaseSettings(settings: Record<string, unknown>, home: string, root: string): { settings: Record<string, unknown>; count: number } {
+  const { text, count } = rebaseDefaultRoot(JSON.stringify(withoutExempt(settings)), home, root);
+  const out = JSON.parse(text) as Record<string, unknown>;
+  for (const k of REBASE_EXEMPT_KEYS) if (k in settings) out[k] = settings[k];
+  return { settings: out, count };
+}
