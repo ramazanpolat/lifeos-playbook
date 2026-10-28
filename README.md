@@ -21,7 +21,8 @@ bun ~/.claude-playbooks/lifeos/playbook/convert.ts          # install LifeOS int
 lifeos                                                      # start it; run /LifeOS setup
 ```
 
-`playbook/upstream.json` pins one upstream release by commit. A daily GitHub Action
+Every PR runs `ci`: a leak scan, unit tests, the e2e suite on Linux and macOS, and the cpb
+round trip. `playbook/upstream.json` pins one upstream release by commit. A daily GitHub Action
 (`upstream-watch`) checks for a newer release, converts it in a sandbox with the e2e suite,
 and pins it only when that passes. `cpb update lifeos` then converts the new pin in place.
 
