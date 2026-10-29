@@ -4,7 +4,9 @@
  *
  *   bun playbook/watch.ts                         # report pinned vs latest; exit 0 current, 10 newer
  *   bun playbook/watch.ts --candidate-out <file>  # same, and write a newer release as a candidate pin
- *   bun playbook/watch.ts --bump                  # detect, then run the e2e suite on this machine's OS;
+ *   bun playbook/watch.ts --bump                  # detect, then run the e2e suite on this machine's OS
+ *                                                 # (a disposable VM, container or CI runner: it runs
+ *                                                 # upstream's installer);
  *                                                 # keeps the candidate file, does not pin
  *   bun playbook/watch.ts --apply <file>          # make a candidate the pin; bump .playbook version
  *
@@ -65,23 +67,33 @@ function e2e(candidate: string): boolean {
 }
 
 function apply(candidate: string): string {
+  // Validate both files before writing either, so a failure never leaves them disagreeing.
   const next = readPin(candidate);
-  writePin(pinFile, next);
   const text = readFileSync(manifest, "utf8");
   const cur = text.match(/^version\s*=\s*"(.*)"$/m)?.[1] ?? "";
   const version = nextPlaybookVersion(cur, next.version);
-  writeFileSync(manifest, setManifestVersion(text, version));
+  const newManifest = setManifestVersion(text, version);
+  writePin(pinFile, next);
+  writeFileSync(manifest, newManifest);
   say(`pinned ${next.version}@${next.commit.slice(0, 12)}; playbook version ${cur} -> ${version}`);
   return version;
 }
 
 async function main(): Promise<number> {
   const args = process.argv.slice(2);
+  const usage = `usage: bun ${import.meta.path} [--candidate-out <file>] [--bump] | --apply <file>`;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--bump") continue;
+    if (args[i] === "--apply" || args[i] === "--candidate-out") {
+      if (!args[i + 1] || args[i + 1].startsWith("--")) throw new Error(`${args[i]} needs a file. ${usage}`);
+      i++;
+      continue;
+    }
+    throw new Error(`unknown argument: ${args[i]}. ${usage}`);
+  }
   const opt = (f: string) => {
     const i = args.indexOf(f);
-    if (i < 0) return undefined;
-    if (!args[i + 1]) throw new Error(`${f} needs a file`);
-    return args[i + 1];
+    return i < 0 ? undefined : args[i + 1];
   };
 
   const applyFile = opt("--apply");
@@ -93,13 +105,19 @@ async function main(): Promise<number> {
   const latest = await detect();
   if (!latest) return 0;
   const out = opt("--candidate-out");
-  if (out) writePin(out, latest);
-  if (!args.includes("--bump")) return 10;
+  if (out) {
+    writePin(out, latest);
+    say(`candidate written to ${out}; pin unchanged`);
+  }
+  if (!args.includes("--bump")) {
+    say("next: the upstream-watch workflow tests it on Linux and macOS and pins it; locally, --bump tests it on this OS");
+    return 10;
+  }
 
   const candidate = out ?? join(here, `.candidate-${latest.version}.json`);
   if (!out) writePin(candidate, latest);
   if (!e2e(candidate)) {
-    say("e2e failed; pin unchanged");
+    say(`e2e failed on ${process.platform}; pin unchanged (exit 12). The failed checks and the kept sandbox are listed above`);
     if (!out) rmSync(candidate, { force: true });
     return 12;
   }

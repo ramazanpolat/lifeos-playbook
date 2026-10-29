@@ -121,3 +121,41 @@ If a network-fetched conversion fails before completing (`exit 1`), `convert.ts`
 ```
 
 You can also keep the staging directory on a successful run by passing `--keep-staging`.
+
+## Interrupted Conversion (Ctrl-C)
+
+Run the same command again. The next run takes over the interrupted run's lock
+(`an earlier conversion (pid N) was interrupted; taking over its lock and continuing`) and
+completes the conversion; every step is safe to repeat. If upstream's installer was stopped
+mid-step, the message is `upstream's installer stopped without a usable report ... The
+conversion is safe to run again: <command>`. Wait until no `bun` process from the interrupted
+run is left before rerunning.
+
+## Settings Backport Failure Before an Upgrade
+
+Before an upgrade, the converter runs upstream's `SettingsBackport` to carry hand edits from
+`settings.json` into the user settings layer. If that fails, the converter stops with exit `1`
+before changing anything and names the error. Keep a copy of `settings.json`, fix the error, and
+rerun. `--skip-settings-backport` upgrades anyway, accepting that edits not yet in the user layer
+may be lost at the next per-session rebuild.
+
+## What Uninstalling Leaves Behind
+
+`cpb DROP PLAYBOOK lifeos --yes` removes the playbook directory and its launcher. Two upstream
+locations shared by every LifeOS install of your user stay:
+
+- `~/.local/state/lifeos/` (runtime state: STATVS, Atlas, Vigil, ...)
+- `/tmp/lifeos-session-start.txt` (a session timestamp; cleared on reboot)
+
+If no other LifeOS install uses them, remove them by hand:
+
+```bash
+rm -rf ~/.local/state/lifeos /tmp/lifeos-session-start.txt
+```
+
+## `cpb SHOW PLAYBOOK` Looks Un-isolated
+
+`Env sets: (none)`, `Variables: (none)` and `Sandbox: no` describe cpb's optional launch
+features, not LifeOS's isolation. The playbook is isolated by its own `CLAUDE_CONFIG_DIR`, and the
+LifeOS paths are pinned in its `settings.json`; `convert.ts --check` verifies them.
+

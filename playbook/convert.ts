@@ -4,6 +4,7 @@
  *
  *   bun playbook/convert.ts            # convert (fresh install, or upgrade in place)
  *   bun playbook/convert.ts --plan     # print what would happen, change nothing
+ *   bun playbook/convert.ts --check    # is the converted install healthy? (changes nothing)
  *
  * Flags: --root <dir>        playbook root (default: the playbook this script lives in)
  *        --pin <file>        pin file (default: playbook/upstream.json)
@@ -11,6 +12,7 @@
  *        --unverified-src    accept --src without checking its commit
  *        --allow-downgrade   convert a release older than the installed one
  *        --keep-staging      keep the fetched source after a successful run
+ *        --skip-settings-backport   upgrade even if carrying settings.json edits into the user layer fails
  *        --migrate-from <v> --migrate-to <v>   set by bin/migrate (cpb update), logged only
  *
  * The conversion is a policy over upstream's own installer, not a rewrite of it:
@@ -23,7 +25,10 @@
  *   6. append the playbook section to CLAUDE.md
  *   7. audit: nothing inside points at ~/.claude, nothing outside the root changed
  *
- * Exit: 0 converted and clean (with --plan: ready), 1 failed, 2 refused (preflight; with --plan:
+ * --check runs upstream's Doctor with this playbook's settings env (a bare Doctor run from a
+ * shell lacks it and misreports the USER links), plus the pin, the audit and the USER resolution.
+ *
+ * Exit: 0 converted and clean (with --plan: ready; with --check: healthy), 1 failed (with --check: not converted), 2 refused (preflight; with --plan:
  *       not ready, the missing prerequisite is named), 3 converted but the audit found problems.
  */
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -52,19 +57,21 @@ interface Opts {
   unverifiedSrc: boolean;
   allowDowngrade: boolean;
   keepStaging: boolean;
+  skipBackport: boolean;
   plan: boolean;
+  check: boolean;
   migrateFrom?: string;
   migrateTo?: string;
 }
 
 function parseArgs(argv: string[]): Opts {
   const here = import.meta.dir;
-  const o: Opts = { root: dirname(here), pin: join(here, "upstream.json"), unverifiedSrc: false, allowDowngrade: false, keepStaging: false, plan: false };
+  const o: Opts = { root: dirname(here), pin: join(here, "upstream.json"), unverifiedSrc: false, allowDowngrade: false, keepStaging: false, skipBackport: false, plan: false, check: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const val = () => {
       const v = argv[++i];
-      if (v === undefined) throw new Refusal(`${a} needs a value`);
+      if (v === undefined || v.startsWith("--")) throw new Refusal(`${a} needs a value. Show the flags with: bun ${import.meta.path} --help`);
       return v;
     };
     if (a === "--root") o.root = val();
@@ -73,13 +80,15 @@ function parseArgs(argv: string[]): Opts {
     else if (a === "--unverified-src") o.unverifiedSrc = true;
     else if (a === "--allow-downgrade") o.allowDowngrade = true;
     else if (a === "--keep-staging") o.keepStaging = true;
+    else if (a === "--skip-settings-backport") o.skipBackport = true;
     else if (a === "--plan") o.plan = true;
+    else if (a === "--check") o.check = true;
     else if (a === "--migrate-from") o.migrateFrom = val();
     else if (a === "--migrate-to") o.migrateTo = val();
     else if (a === "-h" || a === "--help") {
       console.log(readFileSync(import.meta.path, "utf8").split("*/")[0]);
       process.exit(0);
-    } else throw new Refusal(`unknown argument: ${a}`);
+    } else throw new Refusal(`unknown argument: ${a}. Show the flags with: bun ${import.meta.path} --help`);
   }
   o.root = resolve(o.root);
   return o;
@@ -87,11 +96,24 @@ function parseArgs(argv: string[]): Opts {
 
 const log = (m: string) => console.log(`[convert] ${m}`);
 
+/** The command that reruns this conversion as the user started it (for "then run: ..." hints). */
+let RETRY = `bun ${import.meta.path}`;
+function retryCommand(o: Opts): string {
+  const here = import.meta.dir;
+  let c = `bun ${join(o.root, "playbook", "convert.ts")}`;
+  if (o.root !== dirname(here)) c = `bun ${import.meta.path} --root ${o.root}`;
+  if (o.pin !== join(here, "upstream.json")) c += ` --pin ${o.pin}`;
+  if (o.src) c += ` --src ${o.src}`;
+  if (o.unverifiedSrc) c += " --unverified-src";
+  if (o.allowDowngrade) c += " --allow-downgrade";
+  return c;
+}
+
 function preflight(root: string, home: string): void {
-  if (!existsSync(join(root, ".playbook"))) throw new Refusal(`${root} has no .playbook: not a playbook root`);
-  if (/\s/.test(root)) throw new Refusal(`playbook root contains whitespace (${root}); upstream hook commands would break`);
+  if (!existsSync(join(root, ".playbook"))) throw new Refusal(`${root} has no .playbook, so it is not a playbook. Point --root at the directory cpb created, or create one with: cpb CREATE PLAYBOOK lifeos FROM https://github.com/ramazanpolat/lifeos-playbook`);
+  if (/\s/.test(root)) throw new Refusal(`the playbook path contains whitespace (${root}), which breaks upstream's hook commands. Use a playbook directory whose path has none`);
   const def = join(home, ".claude");
-  if (existsSync(def) && realpathSync(root) === realpathSync(def)) throw new Refusal("refusing to convert the default profile ~/.claude");
+  if (existsSync(def) && realpathSync(root) === realpathSync(def)) throw new Refusal("~/.claude is the default Claude Code profile, not a playbook; it is never converted. Convert the playbook instead: bun ~/.claude-playbooks/lifeos/playbook/convert.ts --plan");
   // Every path the conversion writes must stay inside the root, symlinks resolved: a
   // settings.json linked to ~/.claude/settings.json would be written through.
   const realRoot = realpathSync(root);
@@ -99,11 +121,11 @@ function preflight(root: string, home: string): void {
     const p = join(root, rel);
     if (!existsSync(p)) continue;
     const real = realpathSync(p);
-    if (real !== realRoot && !real.startsWith(realRoot + "/")) throw new Refusal(`${rel} resolves outside the playbook (${real}); the conversion would write through it`);
+    if (real !== realRoot && !real.startsWith(realRoot + "/")) throw new Refusal(`${rel} is a link to ${real}, outside the playbook; converting would write through it. Keep a copy of that target, replace ${join(root, rel)} with a real file or directory, then check again with --plan`);
   }
   const v = run("bun", ["--version"], { capture: true }).stdout.trim();
   const [maj, min] = v.split(".").map(Number);
-  if (maj < BUN_MIN[0] || (maj === BUN_MIN[0] && min < BUN_MIN[1])) throw new Refusal(`bun ${v} is too old; LifeOS needs ${BUN_MIN.join(".")}+`);
+  if (maj < BUN_MIN[0] || (maj === BUN_MIN[0] && min < BUN_MIN[1])) throw new Refusal(`bun ${v} is too old; LifeOS needs ${BUN_MIN.join(".")} or newer. Run: bun upgrade`);
   run("git", ["--version"], { capture: true });
 }
 
@@ -188,11 +210,12 @@ function lock(stateDir: string): () => void {
       process.kill(pid, 0);
       alive = true;
     } catch {}
-    if (alive) throw new Refusal(`another conversion is running (pid ${pid}); wait for it to finish, or remove ${f} if that process is not a conversion`);
-    log(`taking over the lock of pid ${pid}, which is no longer running (an interrupted conversion)`);
+    if (alive)
+      throw new Refusal(`another conversion holds the lock (pid ${pid}). Wait for it to finish, then run the command again. To see what pid ${pid} is: ps -p ${pid} -o pid=,command= . Only if it is not a conversion, remove ${f}`);
+    log(`an earlier conversion (pid ${pid}) was interrupted; taking over its lock and continuing`);
     rmSync(f, { force: true });
   }
-  throw new Refusal(`could not take the lock ${f}: another conversion started at the same moment`);
+  throw new Refusal("another conversion started at the same moment and holds the lock. Wait for it to finish, then run the command again");
 }
 
 interface InstallStep {
@@ -207,22 +230,30 @@ interface InstallStep {
 /** Run InstallAll in JSON mode: one line per step, and the reason and output of a failed one. */
 function installAll(args: string[], root: string, env: Record<string, string | undefined>): void {
   const r = run("bun", args, { cwd: root, env, capture: true, allowFail: true });
-  let report: { ok?: boolean; mode?: string; error?: string; steps?: InstallStep[] };
+  let report: { ok?: boolean; mode?: string; error?: string; steps?: InstallStep[] } | null = null;
   try {
     report = JSON.parse(r.stdout);
-  } catch {
-    throw new Error(`InstallAll exited ${r.code} without a JSON report:\n${(r.stderr || r.stdout).trim().split("\n").slice(-20).join("\n")}`);
+  } catch {}
+  if (!report || typeof report !== "object" || !Array.isArray(report.steps)) {
+    const tail = (r.stderr || r.stdout).trim().split("\n").slice(-20).join("\n");
+    throw new Error(`upstream's installer stopped without a usable report (exit ${r.code}; interrupted?). The conversion is safe to run again: ${RETRY}${tail ? `\nits last output:\n${tail}` : ""}`);
   }
   log(`InstallAll (${report.mode ?? "?"}): ${(report.steps ?? []).map((s) => `${s.name} ${s.status}`).join(", ")}`);
   const failed = (report.steps ?? []).filter((s) => s.status === "failed");
+  if (failed.length) {
+    const timedOut = failed.some((s) => s.exit === 124 || /timed out/.test(s.reason ?? ""));
+    log(`installation incomplete: ${failed.map((s) => s.name).join(", ")} failed.`);
+    log(timedOut
+      ? `  a step hit upstream's time limit (often a stalled package download). Wait until no bun process is left running, then run again: ${RETRY}`
+      : `  fix the error below, then run again (the conversion is safe to repeat): ${RETRY}`);
+    log("  upstream's diagnostics:");
+  }
   for (const s of failed) {
     log(`  ${s.name} failed (exit ${s.exit ?? "?"})${s.reason ? `: ${s.reason}` : ""}`);
     const detail = s.tail ?? JSON.stringify(s.report ?? {}, null, 2);
     for (const line of detail.trim().split("\n").slice(-30)) log(`    ${line}`);
   }
-  if (failed.some((s) => /timed out/.test(s.reason ?? "")))
-    log("  an upstream step hit its time limit, usually a stalled `bun install` on a cold cache; the conversion is safe to run again once it has exited");
-  if (r.code !== 0 || report.ok === false || failed.length) throw new Error(`InstallAll failed: ${report.error ?? `exit ${r.code}`}`);
+  if (r.code !== 0 || report.ok === false || failed.length) throw new Error(`upstream's installer failed (${report.error ?? `exit ${r.code}`}); see above`);
 }
 
 /**
@@ -257,6 +288,27 @@ function rebaseUserTree(userTree: string, home: string, root: string, skip: stri
   return changed;
 }
 
+function sha256(text: string): string {
+  return new Bun.CryptoHasher("sha256").update(text).digest("hex");
+}
+
+/** The newest backup of `name` that upstream's OverlaySystem left in .lifeos-overlay-backups/. */
+function newestBackup(root: string, name: string): string | null {
+  const dir = join(root, ".lifeos-overlay-backups");
+  if (!existsSync(dir)) return null;
+  const found: string[] = [];
+  const walk = (d: string) => {
+    for (const n of readdirSync(d)) {
+      const p = join(d, n);
+      if (lstatSync(p).isDirectory()) walk(p);
+      else if (n.startsWith(name)) found.push(p);
+    }
+  };
+  walk(dir);
+  found.sort((a, b) => lstatSync(b).mtimeMs - lstatSync(a).mtimeMs);
+  return found[0] ?? null;
+}
+
 function pruneSkillBackups(root: string): void {
   const dir = join(root, ".lifeos-skill-backups");
   if (!existsSync(dir)) return;
@@ -265,12 +317,63 @@ function pruneSkillBackups(root: string): void {
   if (old.length) log(`pruned ${old.length} old skill backup(s)`);
 }
 
+/** --check: report on a converted install without changing it. */
+function check(root: string, home: string): number {
+  const say = (m: string) => console.log(`[check] ${m}`);
+  const userData = join(root, USER_DATA);
+  const state = readJson(join(root, STATE_DIR, "state.json"));
+  if (!state.version) {
+    say(`not converted yet: run bun ${join(root, "playbook/convert.ts")}`);
+    return 1;
+  }
+  say(`LifeOS ${state.version} in ${root} (last conversion ${state.converted}, ${state.mode})`);
+  let trouble = 0;
+  const pin = readPin(join(root, "playbook", "upstream.json"));
+  if (pin.version !== state.version || pin.commit !== state.commit) {
+    say(`pin says ${pin.version} @ ${pin.commit.slice(0, 12)}, but ${state.version} is installed: run bun ${join(root, "playbook/convert.ts")}`);
+    trouble++;
+  } else say(`pin: matches (${pin.version} @ ${pin.commit.slice(0, 12)})`);
+  const problems = auditInside(root, home, userData);
+  if (problems.length) {
+    say(`isolation: ${problems.length} problem(s); running the converter again repairs most of them:`);
+    for (const p of problems) say(`  - ${p}`);
+    trouble++;
+  } else say("isolation: ok (settings, config path, USER and MEMORY links all inside the playbook)");
+  const settings = readJson(join(root, "settings.json"));
+  const env = { ...process.env, ...(settings.env ?? {}), CLAUDE_CONFIG_DIR: root };
+  const resolved = run("bun", ["-e", `const { lifeosUserDir } = await import(${JSON.stringify(join(root, "LIFEOS/TOOLS/LifeosConfig.ts"))}); console.log(lifeosUserDir())`], { cwd: root, env, capture: true, allowFail: true }).stdout.trim();
+  if (resolved.startsWith(root + "/")) say(`LifeOS reads its USER tree from ${resolved}`);
+  else {
+    say(`LifeOS resolves its USER tree to ${resolved || "(nothing)"}, outside the playbook: run the converter again`);
+    trouble++;
+  }
+  const doctor = run("bun", [join(root, "LIFEOS/TOOLS/Doctor.ts")], { cwd: root, env, capture: true, allowFail: true });
+  const lines = (doctor.stdout + doctor.stderr).split("\n");
+  const broken = lines.filter((l) => l.includes("❌")).map((l) => l.trim());
+  const live = lines.filter((l) => l.includes("✅")).length;
+  say(`upstream Doctor, with this playbook's settings: ${live} live, ${broken.length} broken`);
+  for (const b of broken) say(`  ${b}`);
+  if (broken.length) say("  (before /LifeOS setup, unrendered identity placeholders are expected; missing optional tools only disable the features Doctor names)");
+  say(trouble ? "needs attention: see above" : "healthy");
+  return trouble ? 3 : 0;
+}
+
 function main(): number {
   const o = parseArgs(process.argv.slice(2));
   const home = homedir();
   const root = o.root;
+  if (o.check) {
+    if (!existsSync(join(root, ".playbook"))) throw new Refusal(`${root} has no .playbook: not a playbook root`);
+    return check(root, home);
+  }
   preflight(root, home);
-  const pin = readPin(o.pin);
+  RETRY = retryCommand(o);
+  let pin;
+  try {
+    pin = readPin(o.pin);
+  } catch (e) {
+    throw new Refusal(`cannot read the release pin ${o.pin}: ${e instanceof Error ? e.message : e}. Restore it from the playbook source (cpb update <name>) or point --pin at a valid pin file`);
+  }
   const userData = join(root, USER_DATA);
   const stateDir = join(root, STATE_DIR);
   const tmp = join(stateDir, "tmp");
@@ -278,7 +381,7 @@ function main(): number {
   const mode = installed ? "upgrade" : "fresh";
 
   if (installed && compareVersions(pin.version, installed) < 0 && !o.allowDowngrade)
-    throw new Refusal(`installed LifeOS ${installed} is newer than the pin ${pin.version}; pass --allow-downgrade to go back`);
+    throw new Refusal(`installed LifeOS ${installed} is newer than the pin ${pin.version}, so nothing was changed. To go back to ${pin.version} on purpose: ${RETRY} --allow-downgrade`);
 
   log(`root      ${root}`);
   log(`release   ${pin.repo} ${pin.version} @ ${pin.commit.slice(0, 12)}`);
@@ -291,9 +394,10 @@ function main(): number {
     log(`plan only: components ${WANTED_COMPONENTS.join(",")} (minus any the release lacks); all core services declined`);
     if (missingPrereqs.length) {
       for (const m of missingPrereqs) log(`not ready: ${m}`);
+      log(`then check again: ${RETRY} --plan`);
       return 2;
     }
-    log("ready: run the same command without --plan to convert");
+    log(`ready: local prerequisites are in place (network access and the lock are checked when it runs). Next: ${RETRY}`);
     return 0;
   }
   if (missingPrereqs.length) throw new Refusal(missingPrereqs.join("; "));
@@ -309,12 +413,19 @@ function main(): number {
     if (o.src) {
       if (!o.unverifiedSrc) verifyLocalSource(o.src, pin.commit);
     } else {
-      log("fetching the pinned commit");
-      fetchCommit(pin.repo, pin.commit, staging);
+      log(`fetching LifeOS ${pin.version} (commit ${pin.commit.slice(0, 12)}) from github.com/${pin.repo}`);
+      try {
+        fetchCommit(pin.repo, pin.commit, staging);
+      } catch (e) {
+        throw new Error(`could not download LifeOS ${pin.version} (${pin.commit.slice(0, 12)}) from https://github.com/${pin.repo}: check the network, then run again: ${RETRY}\n  offline alternative: a local checkout of that repo at that commit, passed with --src <dir>\n  git said: ${e instanceof Error ? e.message.split("\n").slice(-3).join(" ") : e}`);
+      }
     }
     const skillSrc = join(staging, pin.subpath);
     for (const f of ["install/install.sh", "Tools/InstallAll.ts", "install/LIFEOS/VERSION"])
-      if (!existsSync(join(skillSrc, f))) throw new Error(`release has no ${pin.subpath}/${f}: upstream layout changed`);
+      if (!existsSync(join(skillSrc, f)))
+        throw new Error(o.src
+          ? `${join(o.src, pin.subpath, f)} does not exist: --src must name the repository root (the directory that contains ${pin.subpath}/), not the skill directory`
+          : `release ${pin.version} has no ${pin.subpath}/${f}: upstream changed its layout, so this converter needs an update`);
     const payloadVersion = readFileSync(join(skillSrc, "install/LIFEOS/VERSION"), "utf8").trim();
     if (payloadVersion !== pin.version) throw new Error(`release payload says ${payloadVersion}, the pin says ${pin.version}`);
 
@@ -328,7 +439,10 @@ function main(): number {
       // InstallSettings writes upstream's CLAUDE.md only when none exists.
       renameSync(claudeMd, join(stateDir, "bootstrap-CLAUDE.md"));
     } else if (existsSync(claudeMd)) {
-      claudeBefore = stripSection(readFileSync(claudeMd, "utf8"));
+      // Compare with what the last completed conversion wrote: only a user's own edit counts.
+      const last = readJson(join(stateDir, "state.json")).claudeMdSha;
+      const text = readFileSync(claudeMd, "utf8");
+      if (typeof last === "string" && last !== sha256(text)) claudeBefore = stripSection(text);
     }
     const rootEnv = rootEnvFor(root, userData);
     const settingsPath = join(root, "settings.json");
@@ -343,13 +457,19 @@ function main(): number {
       // Fold hand edits made since the last merge into the user layer before anything rewrites
       // settings.json -- the same backport upstream's SessionStart hook runs.
       const b = run("bun", [join(root, "LIFEOS/TOOLS/SettingsBackport.ts")], { cwd: root, env, capture: true, allowFail: true });
-      log(`settings backport before upgrade: ${(b.stdout || b.stderr).trim().split("\n").pop() ?? `exit ${b.code}`}`);
+      const said = (b.stdout || b.stderr).trim().split("\n").pop() || `exit ${b.code}`;
+      if (b.code !== 0 && !o.skipBackport)
+        throw new Error(`could not carry your settings.json edits into the user layer before upgrading (SettingsBackport: ${said}). Nothing has been changed. Keep a copy of ${settingsPath}, fix the error, then run again: ${RETRY}\n  to upgrade anyway, accepting that edits not yet in the user layer may be lost: ${RETRY} --skip-settings-backport`);
+      log(`settings edits carried into the user layer before the upgrade (${said})`);
     }
 
     // 3. Place the skill with the release's own installer.
-    log("placing the skill (release install.sh)");
-    run("bash", [join(skillSrc, "install/install.sh")], {
+    log("placing the LifeOS skill (the release's install.sh)");
+    // Captured: its onboarding text ("Open your harness and run ...") is for a plain install.
+    const placed = run("bash", [join(skillSrc, "install/install.sh")], {
       cwd: root,
+      capture: true,
+      allowFail: true,
       env: {
         ...env,
         LIFEOS_SRC: staging,
@@ -360,6 +480,10 @@ function main(): number {
         LIFEOS_AUTO_INSTALL_BUN: "0",
       },
     });
+    if (placed.code !== 0) {
+      for (const line of (placed.stdout + placed.stderr).trim().split("\n").slice(-25)) log(`  ${line}`);
+      throw new Error(`the release's install.sh failed (exit ${placed.code}); its last lines are above`);
+    }
     const skillRoot = join(root, "skills", "LifeOS");
 
     // 4. Run the release's InstallAll with the playbook policy.
@@ -369,6 +493,7 @@ function main(): number {
     const { use, missing } = pickComponents(WANTED_COMPONENTS, offered);
     if (missing.length) log(`release no longer offers: ${missing.join(", ")}`);
     log(`installing: components ${use.join(",") || "(none)"}; declining services ${declined.join(",") || "(none)"}`);
+    log(`running upstream's installer (${installed ? "upgrade" : "fresh install"}): installs packages${process.platform === "linux" ? " and compiles native modules" : ""}, usually 1-3 minutes with no output until it finishes`);
     const installArgs = [join(skillRoot, "Tools/InstallAll.ts"), "--yes", "--json", "--config-root", root, "--skill-root", skillRoot];
     // An empty --components deploys the default set, which includes components that write outside the root.
     if (!use.length) throw new Error(`release offers none of ${WANTED_COMPONENTS.join(",")}: upstream changed its components`);
@@ -416,7 +541,7 @@ function main(): number {
     }
     const userLayer = join(userData, "USER", "CONFIG", "settings.user.json");
     const userFiles = rebaseUserTree(join(userData, "USER"), home, root, [userLayer]);
-    if (userFiles.length) log(`USER tree: rebased default-profile paths in ${userFiles.length} file(s): ${userFiles.join(", ")}`);
+    if (userFiles.length) log(`USER tree: rebased default-profile paths in ${userFiles.length} file(s) (listed in .lifeos-playbook/state.json)`);
     // MergeSettings rebuilds settings.json from settings.system.json + the user layer each
     // session and keeps nothing else, so the keys cpb writes must live in the user layer too.
     if (existsSync(dirname(userLayer))) {
@@ -443,7 +568,7 @@ function main(): number {
       claudeReplaced = claudeBefore !== null && claudeBefore !== stripSection(current);
       writeFileSync(claudeMd, upsertSection(current, playbookSection({ root, userData, version: pin.version, commit: pin.commit })));
       if (claudeReplaced)
-        log("CLAUDE.md now holds upstream's template; the previous one is in .lifeos-overlay-backups/. Keep personal instructions in CLAUDE.local.md, which updates never touch");
+        log(`your edits to CLAUDE.md were replaced by upstream's template; your version is saved at ${newestBackup(root, "CLAUDE.md") ?? ".lifeos-overlay-backups/"}. Move personal instructions to CLAUDE.local.md, which updates never touch`);
     }
     pruneSkillBackups(root);
 
@@ -466,21 +591,28 @@ function main(): number {
       components: use,
       declinedServices: declined,
       claudeMdReplaced: claudeReplaced,
+      claudeMdSha: existsSync(claudeMd) ? sha256(readFileSync(claudeMd, "utf8")) : null,
+      rebasedUserFiles: userFiles,
       problems,
     });
     ok = true;
     if (problems.length) {
-      log(`converted, but the audit found ${problems.length} problem(s):`);
+      log(`converted, but the isolation audit found ${problems.length} problem(s) (exit 3):`);
       for (const p of problems) log(`  - ${p}`);
+      log(`running the converter again repairs settings and links: ${RETRY}`);
+      log("changes outside the playbook are reported, not undone: check them yourself");
+      log(`full report: ${join(stateDir, "state.json")}`);
       return 3;
     }
-    log(`done: LifeOS ${pin.version} is installed in ${root}${mode === "fresh" ? "; start the playbook and run /LifeOS setup to begin the interview" : ""}`);
+    log(`done: LifeOS ${pin.version} is installed in ${root}`);
+    if (mode === "fresh") log("next: start the playbook (its launcher, or cpb run <name>) and type /LifeOS setup to begin the interview");
+    else log("next: restart any open sessions of this playbook so they load the new settings and hooks");
     return 0;
   } finally {
     unlock();
     rmSync(tmp, { recursive: true, force: true });
     if (ok && !o.src && !o.keepStaging) rmSync(join(stateDir, "staging"), { recursive: true, force: true });
-    else if (!ok && !o.src) log(`source kept for diagnosis: ${staging}`);
+    else if (!ok && !o.src && existsSync(staging)) log(`fetched source kept at ${staging}; the next run reuses or replaces it`);
   }
 }
 

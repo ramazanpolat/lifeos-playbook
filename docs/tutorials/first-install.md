@@ -62,8 +62,25 @@ The converter performs seven steps:
 When the run finishes cleanly, it exits `0` and prints:
 
 ```text
-[convert] done: LifeOS 8.761.0 is installed in /home/user/.claude-playbooks/lifeos; start the playbook and run /LifeOS setup to begin the interview
+[convert] done: LifeOS 8.761.0 is installed in /home/user/.claude-playbooks/lifeos
+[convert] next: start the playbook (its launcher, or cpb run <name>) and type /LifeOS setup to begin the interview
 ```
+
+Upstream's installer runs silently for one to three minutes in the middle of this; that is normal.
+If you interrupt it, run the same command again: the conversion is safe to repeat.
+
+Then check the result:
+
+```bash
+bun ~/.claude-playbooks/lifeos/playbook/convert.ts --check
+```
+
+`--check` verifies the pin, the isolation audit and where LifeOS reads its USER tree, and runs
+upstream's Doctor with the playbook's own settings. Do not run `LIFEOS/TOOLS/Doctor.ts` directly
+from a shell: without the playbook's settings it looks for `~/.config/LIFEOS`, reports the USER
+links as broken, and suggests a relink command that would break the playbook's isolation. Before
+`/LifeOS setup`, Doctor lists unrendered identity placeholders and a few optional tools as broken;
+that is expected.
 
 ## 4. Launch and Run Setup
 
@@ -80,5 +97,14 @@ Inside the session, start the LifeOS onboarding interview:
 ```text
 /LifeOS setup
 ```
+
+The interview is LifeOS's own: your assistant asks about you, your goals (TELOS) and how you
+want it to work, names itself, and writes the answers into your USER tree. It may offer extras
+(the statusline, background services, a terminal layer); the playbook's section in `CLAUDE.md`
+asks it not to install the ones that write outside the playbook.
+
+Personal instructions for the assistant go in `CLAUDE.local.md` next to `CLAUDE.md`, not in
+`CLAUDE.md` itself: updates replace `CLAUDE.md` with upstream's template, and `CLAUDE.local.md`
+is imported from it and never touched.
 
 LifeOS's `USER` tree and memory live under `/home/user/.claude-playbooks/lifeos/user-data/USER` (linked from `LIFEOS/USER` and `LIFEOS/MEMORY`). Other configuration and state, including root settings (`settings.json`), `.env`, and personal instructions (`CLAUDE.local.md`), live elsewhere in the playbook root.

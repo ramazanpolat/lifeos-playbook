@@ -9,4 +9,6 @@ When the user starts a session here, tell them LifeOS is not converted yet and o
 - the plan, which changes nothing: `bun "$CLAUDE_CONFIG_DIR/playbook/convert.ts" --plan`
 - the conversion, with their consent: `bun "$CLAUDE_CONFIG_DIR/playbook/convert.ts"`
 
-After a conversion, suggest restarting the session so the new settings.json and hooks load.
+After the converter exits 0, tell the user to restart this session (so the new settings.json, CLAUDE.md
+and hooks load) and then type `/LifeOS setup`. For any other exit, explain the failure it printed and
+the next step it names before suggesting a restart.

@@ -155,8 +155,12 @@ if [ "$FRESH_OK" -eq 1 ]; then
   check "rerun: CLAUDE.md still imports CLAUDE.local.md" grep -qx '@CLAUDE.local.md' "$ROOT/CLAUDE.md"
   check "rerun: LifeOS still reads its own config" bash -c "[[ '$(resolve_user_dir "$ROOT")' == '$ROOT'/* ]]"
 
-  echo "== Doctor (informational)"
-  (cd "$ROOT" && CLAUDE_CONFIG_DIR="$ROOT" bun LIFEOS/TOOLS/Doctor.ts 2>&1 | tail -n 15 | sed 's/^/        /') || true
+  echo "== convert --check (pin, isolation, USER resolution, upstream Doctor with the playbook's env)"
+  ccode=0
+  bun "$ROOT/playbook/convert.ts" --check >"$SANDBOX/check.log" 2>&1 || ccode=$?
+  sed 's/^/        /' "$SANDBOX/check.log" | grep -v '^        \[check\]   ✅' | head -30
+  check "check: healthy" test "$ccode" = 0
+  check "check: Doctor no longer misreports the USER links" bash -c "! grep -q 'USER-data mounts.*broken' '$SANDBOX/check.log'"
 fi
 
 if [ -n "$FROM_PIN" ] && [ "$(json "$FROM_PIN" j.commit)" = "$(json "$PIN" j.commit)" ]; then

@@ -63,6 +63,8 @@ bun test
 - `--allow-downgrade`: allow converting a pin version lower than `LIFEOS/VERSION`
 - `--keep-staging`: keep `.lifeos-playbook/staging/<commit>` after a successful run
 - `--plan`: run preflight, print the plan without modifying files, and check conversion prerequisites (prints `ready` and exits `0`, or prints `not ready: ...` and exits `2`)
+- `--check`: report on a converted install (pin, isolation audit, USER resolution, upstream Doctor with the playbook's env); changes nothing
+- `--skip-settings-backport`: upgrade even if carrying `settings.json` edits into the user layer fails
 - `--migrate-from <v>` / `--migrate-to <v>`: passed by `playbook/bin/migrate` during `cpb update`
 
 `playbook/convert.ts` exit codes:
@@ -72,23 +74,20 @@ bun test
 - `2`: refused during preflight, CLI parsing, missing conversion prerequisites (`make`/`g++` on Linux, including `--plan` when not ready), downgrade check, or active `.lifeos-playbook/convert.lock`
 - `3`: converted, but the post-install audit recorded isolation problems in `.lifeos-playbook/state.json`
 
-## Verifying Success from `.lifeos-playbook/state.json`
+## Verifying Success
 
-After running `convert.ts` or `cpb update`, verify the installation by checking `<root>/.lifeos-playbook/state.json`:
+After running `convert.ts` or `cpb update`, verify the installation:
 
 ```bash
-bun -e '
-  const fs = require("node:fs");
-  const root = "/home/user/.claude-playbooks/lifeos";
-  const pin = JSON.parse(fs.readFileSync(`${root}/playbook/upstream.json`, "utf8"));
-  const state = JSON.parse(fs.readFileSync(`${root}/.lifeos-playbook/state.json`, "utf8"));
-  const version = fs.readFileSync(`${root}/LIFEOS/VERSION`, "utf8").trim();
-  if (state.version !== pin.version || state.commit !== pin.commit) process.exit(1);
-  if (version !== pin.version) process.exit(1);
-  if (!Array.isArray(state.problems) || state.problems.length !== 0) process.exit(1);
-  console.log("verified:", state.version, state.mode);
-'
+bun ~/.claude-playbooks/lifeos/playbook/convert.ts --check
 ```
+
+It exits `0` and ends with `[check] healthy` when the pin matches what is installed, the isolation
+audit is clean and LifeOS resolves its USER tree inside the playbook; `3` with the problems listed
+otherwise; `1` when the playbook is not converted yet. It also prints upstream Doctor's results,
+run with the playbook's settings env. Never run `LIFEOS/TOOLS/Doctor.ts` bare from a shell, and
+never apply its `ln -sfn ... ~/.config/LIFEOS` relink advice: without the playbook's env it
+misreports the USER links, and the relink breaks isolation.
 
 A healthy conversion satisfies all of the following:
 

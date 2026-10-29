@@ -82,8 +82,11 @@ export function fetchCommit(repo: string, commit: string, dest: string): void {
 
 /** Verify a local checkout is at the pinned commit (offline conversions and tests). */
 export function verifyLocalSource(src: string, commit: string): void {
+  if (!existsSync(src)) throw new Error(`--src ${src} does not exist. It must be a checkout of the upstream repository at commit ${commit}`);
   const r = run("git", ["-C", src, "rev-parse", "HEAD"], { capture: true, allowFail: true });
   const head = r.stdout.trim();
-  if (r.code !== 0) throw new Error(`--src ${src} is not a git checkout; pass --unverified-src to use it anyway`);
-  if (head !== commit) throw new Error(`--src ${src} is at ${head}, the pin says ${commit}`);
+  if (r.code !== 0)
+    throw new Error(`cannot verify --src ${src}: git could not read its HEAD (${(r.stderr || "").trim().split("\n").pop()}). Check it with: git -C ${src} rev-parse HEAD . (--unverified-src skips this integrity check on purpose)`);
+  if (head !== commit)
+    throw new Error(`--src ${src} is at commit ${head.slice(0, 12)}, but the pin requires ${commit.slice(0, 12)}. Switch the checkout with: git -C ${src} fetch origin ${commit} && git -C ${src} switch --detach ${commit}`);
 }

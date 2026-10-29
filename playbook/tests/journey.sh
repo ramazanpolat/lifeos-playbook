@@ -116,8 +116,8 @@ run "convert (fresh)" 0 bun "$ROOT/playbook/convert.ts"
 check "audit clean" test "$(state '.problems.length')" = 0
 check "LIFEOS/VERSION matches the pin" test "$(tr -d '[:space:]' < "$ROOT/LIFEOS/VERSION")" = "$(bun -e "console.log(require('$ROOT/playbook/upstream.json').version)")"
 
-step "8. does it work: Doctor, then every registered hook fired with a synthetic event"
-run "Doctor" any bash -c "cd '$ROOT' && CLAUDE_CONFIG_DIR='$ROOT' bun LIFEOS/TOOLS/Doctor.ts"
+step "8. does it work: convert --check, then every registered hook fired with a synthetic event"
+run "convert --check" 0 bun "$ROOT/playbook/convert.ts" --check
 run "hook smoke" 0 bun "$ROOT/playbook/tests/hook-smoke.ts" --root "$ROOT"
 
 step "9. rerun (idempotent)"

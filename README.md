@@ -14,11 +14,16 @@ policy, so a new upstream release converts without porting work.
 
 ## How
 
+Requirements: [Claude Code](https://claude.com/claude-code), [cpb](https://github.com/ramazanpolat/claude-playbooks)
+4+, bun 1.2+, git. On Linux, LifeOS's installer compiles node-pty, so it also needs `make` and a
+C++ compiler (Debian/Ubuntu: `sudo apt install build-essential`); `--plan` tells you if they are missing.
+
 ```bash
 cpb CREATE PLAYBOOK lifeos FROM https://github.com/ramazanpolat/lifeos-playbook
-bun ~/.claude-playbooks/lifeos/playbook/convert.ts --plan   # what it will do
-bun ~/.claude-playbooks/lifeos/playbook/convert.ts          # install LifeOS into the playbook
-lifeos                                                      # start it; run /LifeOS setup
+bun ~/.claude-playbooks/lifeos/playbook/convert.ts --plan    # what it will do; names anything missing
+bun ~/.claude-playbooks/lifeos/playbook/convert.ts           # install LifeOS into the playbook (1-3 min)
+bun ~/.claude-playbooks/lifeos/playbook/convert.ts --check   # is it healthy?
+lifeos                                                       # start it, then type /LifeOS setup
 ```
 
 Every PR runs `ci`: a leak scan, unit tests, the e2e suite on Linux and macOS, and the cpb
@@ -70,9 +75,6 @@ The last two are shared by every LifeOS install of the same user and are left be
 | `playbook/watch.ts` | detects a newer release, runs local e2e (`--bump`, without pinning), or applies a tested pin (`--apply <file>`) |
 | `playbook/bin/migrate` | the `cpb update` hook: runs the converter |
 | `playbook/tests/` | unit tests (`bun test`), `hook-smoke.ts` (fires registered hooks), `e2e.sh`, `cpb.sh`, `journey.sh` |
-
-Requirements: bun 1.2+, git. On Linux, LifeOS's installer compiles node-pty, so it also
-needs `make` and a C++ compiler (`apt install build-essential`).
 
 `e2e.sh` and `cpb.sh` run upstream's installer under a throwaway `HOME`, and `journey.sh`
 exercises a full install against the machine's real `HOME`: run them on a disposable machine
