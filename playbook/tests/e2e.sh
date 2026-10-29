@@ -92,6 +92,12 @@ if convert "$ROOT" "$SANDBOX/fresh.log"; then FRESH_OK=1; check "fresh: convert 
 if [ "$FRESH_OK" -eq 1 ]; then
   assert_converted "$ROOT" "$V" "fresh"
 
+  echo "== hooks (every registered hook fired with a synthetic Claude Code event)"
+  hcode=0
+  bun "$ROOT/playbook/tests/hook-smoke.ts" --root "$ROOT" >"$SANDBOX/hooks.log" 2>&1 || hcode=$?
+  grep -vE '^  ok ' "$SANDBOX/hooks.log" | sed 's/^/        /'
+  check "fresh: every command hook exits 0" test "$hcode" = 0
+
   echo "== rerun (idempotent; InstallAll takes its upgrade chain now)"
   S1="$(sha "$ROOT/settings.json" "$ROOT/CLAUDE.md")"
   if convert "$ROOT" "$SANDBOX/rerun.log"; then check "rerun: convert exits 0" true; else check "rerun: convert exits 0" false; fi

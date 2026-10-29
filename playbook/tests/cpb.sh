@@ -16,7 +16,11 @@ command -v bun >/dev/null || { echo "cpb.sh: bun not on PATH" >&2; exit 2; }
 
 SANDBOX="$(mktemp -d -t lifeos-cpb-XXXXXX)"
 export HOME="$SANDBOX/home" TMPDIR="$SANDBOX/tmp"
-mkdir -p "$HOME" "$TMPDIR"
+mkdir -p "$HOME" "$TMPDIR" "$SANDBOX/bin"
+CPB_BIN_DIR="$(dirname "$(command -v cpb)")"
+CPB_BIN_BEFORE="$(ls -A "$CPB_BIN_DIR" | sort)"
+# cpb writes launchers next to its own binary unless told otherwise: keep them in the sandbox.
+cpbx() { cpb --launcher-dir "$SANDBOX/bin" "$@"; }
 PASS=0
 FAIL=0
 check() {
@@ -39,7 +43,7 @@ git_c commit -q -m "playbook source"
 
 echo "== cpb CREATE PLAYBOOK FROM the source"
 ROOT="$HOME/.claude-playbooks/lifeos"
-cpb CREATE PLAYBOOK lifeos FROM "file://$SRC" 2>&1 | sed 's/^/        /'
+cpbx CREATE PLAYBOOK lifeos FROM "file://$SRC" 2>&1 | sed 's/^/        /'
 check "install: playbook root exists with the converter" test -f "$ROOT/playbook/convert.ts"
 check "install: bootstrap CLAUDE.md in place" grep -q 'lifeos-playbook:bootstrap' "$ROOT/CLAUDE.md"
 check "install: .playbook declares the migrate step" grep -q 'migrate = "playbook/bin/migrate"' "$ROOT/.playbook"
@@ -59,7 +63,7 @@ echo "cpb-test marker" >> "$SRC/README.md"
 git_c commit -q -am "bump playbook version"
 sleep 61 # state.json stamps minutes; make a second conversion visibly newer
 code=0
-cpb update lifeos --yes >"$SANDBOX/update.log" 2>&1 || code=$?
+cpbx update lifeos --yes >"$SANDBOX/update.log" 2>&1 || code=$?
 tail -n 12 "$SANDBOX/update.log" | sed 's/^/        /'
 check "update: cpb update exits 0" test "$code" = 0
 check "update: source change landed (README)" grep -q 'cpb-test marker' "$ROOT/README.md"
@@ -81,6 +85,14 @@ check "rebuild: hook exits 0" test "$code" = 0
 check "rebuild: cpb's claudeMdExcludes survives unchanged" excludes_ok
 check "rebuild: data home still inside the root" test "$(json "$ROOT/settings.json" j.env.LIFEOS_CONFIG_DIR)" = "$ROOT/user-data"
 check "rebuild: no ~/.claude paths reappear" bash -c "! grep -qE '(~|\\\$HOME)/\\.claude(/|\"|\$)' '$ROOT/settings.json'"
+
+echo "== uninstall"
+code=0
+cpbx DROP PLAYBOOK lifeos --yes >"$SANDBOX/drop.log" 2>&1 || code=$?
+check "drop: cpb DROP PLAYBOOK exits 0" test "$code" = 0
+check "drop: playbook root removed" test ! -e "$ROOT"
+check "drop: launcher removed from the sandbox" test ! -e "$SANDBOX/bin/lifeos"
+check "drop: nothing was ever written next to the cpb binary" test "$(ls -A "$CPB_BIN_DIR" | sort)" = "$CPB_BIN_BEFORE"
 
 echo "cpb.sh: $PASS passed, $FAIL failed"
 if [ "$FAIL" -eq 0 ] && [ "$KEEP" -eq 0 ]; then rm -rf "$SANDBOX"; else echo "cpb.sh: sandbox kept: $SANDBOX"; fi
