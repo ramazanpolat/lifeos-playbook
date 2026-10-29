@@ -121,7 +121,8 @@ if [ "$FRESH_OK" -eq 1 ]; then
   check "fresh: LifeOS reads its own config, not a default-profile LifeOS" bash -c "[[ '$RESOLVED' == '$ROOT'/* ]]"
 
   echo "== a user's own changes: a settings.json edit and CLAUDE.local.md"
-  bun -e "const f='$ROOT/settings.json', fs=require('fs'), s=JSON.parse(fs.readFileSync(f,'utf8')); s.env.E2E_USER_SETTING='kept'; fs.writeFileSync(f, JSON.stringify(s,null,2)+'\n')"
+  # A hand edit, and the shipped statusline switched on (an upgrade must not schedule its machine-wide refresher job).
+  bun -e "const f='$ROOT/settings.json', fs=require('fs'), s=JSON.parse(fs.readFileSync(f,'utf8')); s.env.E2E_USER_SETTING='kept'; s.statusLine={type:'command', command:'$ROOT/LIFEOS/LIFEOS_StatusLine.sh'}; fs.writeFileSync(f, JSON.stringify(s,null,2)+'\n')"
   echo "e2e personal instruction" > "$ROOT/CLAUDE.local.md"
   session_rebuild "$ROOT"
 
@@ -133,6 +134,7 @@ if [ "$FRESH_OK" -eq 1 ]; then
   assert_converted "$ROOT" "$V" "rerun"
   session_rebuild "$ROOT"
   check "rerun: the settings edit survives the first rebuild after an upgrade" test "$(json "$ROOT/settings.json" 'j.env.E2E_USER_SETTING')" = kept
+  check "rerun: the statusline is still configured" bash -c "grep -q 'LIFEOS_StatusLine.sh' '$ROOT/settings.json'"
   check "rerun: CLAUDE.local.md untouched" test "$(cat "$ROOT/CLAUDE.local.md")" = "e2e personal instruction"
   check "rerun: CLAUDE.md still imports CLAUDE.local.md" grep -qx '@CLAUDE.local.md' "$ROOT/CLAUDE.md"
   check "rerun: LifeOS still reads its own config" bash -c "[[ '$(resolve_user_dir "$ROOT")' == '$ROOT'/* ]]"

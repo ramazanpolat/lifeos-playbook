@@ -66,7 +66,7 @@ export function playbookSection(o: { root: string; userData: string; version: st
     `- Upstream release: ${o.version} (commit ${o.commit.slice(0, 12)}), converted by \`playbook/convert.ts\`.`,
     "- Update with `cpb update <playbook-name>`; it re-runs the converter on the newly pinned release.",
     "- Never write to `~/.claude`: it is a different Claude Code profile.",
-    "- Background services (Pulse, launchd jobs), the Helm terminal layer and the shell alias are not installed: they write outside the config root.",
+    "- Background services (Pulse, launchd and systemd jobs), the statusline refresher job, the Helm terminal layer and the shell alias are not installed: they write outside the config root. Do not install them during setup or later; tell the user why if they ask.",
     "- Personal instructions go in `CLAUDE.local.md` beside this file: updates replace CLAUDE.md with upstream's template, never CLAUDE.local.md.",
     "",
     "@CLAUDE.local.md",

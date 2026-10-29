@@ -374,7 +374,26 @@ function main(): number {
     if (!use.length) throw new Error(`release offers none of ${WANTED_COMPONENTS.join(",")}: upstream changed its components`);
     installArgs.push("--components", use.join(","));
     if (declined.length) installArgs.push("--decline-services", declined.join(","));
-    installAll(installArgs, root, env);
+    // Upstream's upgrade chain always runs RefreshStatusline, which schedules a machine-wide
+    // launchd job (com.lifeos.workflows-dispatcher) when settings.json uses the shipped
+    // statusline. Hide it from that one check, then put it back.
+    const live = readJson(settingsPath);
+    const statusLine = live.statusLine;
+    const stash = installed !== null && typeof statusLine?.command === "string" && statusLine.command.includes("LIFEOS_StatusLine.sh");
+    if (stash) {
+      delete live.statusLine;
+      writeJson(settingsPath, live);
+      log("statusline: set aside during the upgrade so upstream schedules no machine-wide refresher job");
+    }
+    try {
+      installAll(installArgs, root, env);
+    } finally {
+      if (stash) {
+        const after = readJson(settingsPath);
+        after.statusLine = statusLine;
+        writeJson(settingsPath, after);
+      }
+    }
 
     // 5. Rebase what upstream leaves pointing at ~/.claude.
     for (const f of ["settings.json", "settings.system.json"]) {
