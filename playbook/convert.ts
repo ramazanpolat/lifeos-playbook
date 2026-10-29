@@ -90,7 +90,9 @@ function parseArgs(argv: string[]): Opts {
       process.exit(0);
     } else throw new Refusal(`unknown argument: ${a}. Show the flags with: bun ${import.meta.path} --help`);
   }
-  o.root = resolve(o.root);
+  // One spelling of the root on every run, whatever path or symlink led here (on macOS,
+  // /var/folders is a link to /private/var/folders, and import.meta.dir reports the latter).
+  o.root = existsSync(o.root) ? realpathSync(resolve(o.root)) : resolve(o.root);
   return o;
 }
 
@@ -342,7 +344,7 @@ function check(root: string, home: string): number {
   const settings = readJson(join(root, "settings.json"));
   const env = { ...process.env, ...(settings.env ?? {}), CLAUDE_CONFIG_DIR: root };
   const resolved = run("bun", ["-e", `const { lifeosUserDir } = await import(${JSON.stringify(join(root, "LIFEOS/TOOLS/LifeosConfig.ts"))}); console.log(lifeosUserDir())`], { cwd: root, env, capture: true, allowFail: true }).stdout.trim();
-  if (resolved.startsWith(root + "/")) say(`LifeOS reads its USER tree from ${resolved}`);
+  if (resolved && existsSync(resolved) && realpathSync(resolved).startsWith(realpathSync(root) + "/")) say(`LifeOS reads its USER tree from ${resolved}`);
   else {
     say(`LifeOS resolves its USER tree to ${resolved || "(nothing)"}, outside the playbook: run the converter again`);
     trouble++;

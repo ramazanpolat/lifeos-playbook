@@ -26,7 +26,8 @@ while [ $# -gt 0 ]; do
 done
 command -v bun >/dev/null || { echo "e2e: bun not on PATH" >&2; exit 2; }
 
-SANDBOX="$(mktemp -d -t lifeos-e2e-XXXXXX)"
+# Resolved: on macOS the temp dir is reached through a symlink (/var -> /private/var).
+SANDBOX="$(cd "$(mktemp -d -t lifeos-e2e-XXXXXX)" && pwd -P)"
 export HOME="$SANDBOX/home" TMPDIR="$SANDBOX/tmp"
 mkdir -p "$HOME" "$TMPDIR"
 PASS=0
@@ -161,6 +162,13 @@ if [ "$FRESH_OK" -eq 1 ]; then
   sed 's/^/        /' "$SANDBOX/check.log" | grep -v '^        \[check\]   ✅' | head -30
   check "check: healthy" test "$ccode" = 0
   check "check: Doctor no longer misreports the USER links" bash -c "! grep -q 'USER-data mounts.*broken' '$SANDBOX/check.log'"
+  # The same playbook reached through a symlink must check out the same (macOS /var -> /private/var).
+  ln -s "$ROOT" "$SANDBOX/linked-playbook"
+  lcode=0
+  bun "$SANDBOX/linked-playbook/playbook/convert.ts" --check >"$SANDBOX/check-linked.log" 2>&1 || lcode=$?
+  check "check: healthy through a symlinked path too" test "$lcode" = 0
+  [ "$lcode" = 0 ] || grep -E 'problem|  - ' "$SANDBOX/check-linked.log" | head -5 | sed 's/^/        /'
+  rm -f "$SANDBOX/linked-playbook"
 fi
 
 if [ -n "$FROM_PIN" ] && [ "$(json "$FROM_PIN" j.commit)" = "$(json "$PIN" j.commit)" ]; then

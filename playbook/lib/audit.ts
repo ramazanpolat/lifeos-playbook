@@ -83,7 +83,18 @@ export function diffSnapshots(before: Snapshot, after: Snapshot): string[] {
 }
 
 function under(path: string, root: string): boolean {
-  return path === root || path.startsWith(root.replace(/\/+$/, "") + "/");
+  const lexical = (p: string, r: string) => p === r || p.startsWith(r.replace(/\/+$/, "") + "/");
+  if (lexical(path, root)) return true;
+  // Another spelling of the same directory (a symlinked parent, /var vs /private/var on macOS).
+  const realRoot = existsSync(root) ? realpathSync(root) : root;
+  if (lexical(path, realRoot)) return true;
+  return existsSync(path) && lexical(realpathSync(path), realRoot);
+}
+
+/** Two spellings of one existing path count as equal. */
+function samePath(a: unknown, b: string): boolean {
+  if (a === b) return true;
+  return typeof a === "string" && existsSync(a) && existsSync(b) && realpathSync(a) === realpathSync(b);
 }
 
 /** Problems inside the root after conversion: leftover default-root paths, links that escape. */
@@ -100,10 +111,10 @@ export function auditInside(root: string, home: string, userData: string): strin
     for (const e of excludes) if (under(e.replace(/\/\*\*$/, ""), root)) problems.push(`${f}: claudeMdExcludes entry ${e} hides the playbook's own CLAUDE.md`);
   }
   const settings = JSON.parse(readFileSync(join(root, "settings.json"), "utf8")) as Record<string, any>;
-  if (settings.env?.LIFEOS_CONFIG_DIR !== userData) problems.push(`settings.json: env.LIFEOS_CONFIG_DIR is ${settings.env?.LIFEOS_CONFIG_DIR}, expected ${userData}`);
-  if (settings.env?.LIFEOS_DIR !== join(root, "LIFEOS")) problems.push(`settings.json: env.LIFEOS_DIR is ${settings.env?.LIFEOS_DIR}, expected ${join(root, "LIFEOS")}`);
+  if (!samePath(settings.env?.LIFEOS_CONFIG_DIR, userData)) problems.push(`settings.json: env.LIFEOS_CONFIG_DIR is ${settings.env?.LIFEOS_CONFIG_DIR}, expected ${userData}`);
+  if (!samePath(settings.env?.LIFEOS_DIR, join(root, "LIFEOS"))) problems.push(`settings.json: env.LIFEOS_DIR is ${settings.env?.LIFEOS_DIR}, expected ${join(root, "LIFEOS")}`);
   const configPath = join(userData, "USER", "CONFIG", "LIFEOS_CONFIG.toml");
-  if (settings.env?.LIFEOS_CONFIG_PATH !== configPath) problems.push(`settings.json: env.LIFEOS_CONFIG_PATH is ${settings.env?.LIFEOS_CONFIG_PATH}, expected ${configPath} (else LifeOS reads ~/.claude's config)`);
+  if (!samePath(settings.env?.LIFEOS_CONFIG_PATH, configPath) && settings.env?.LIFEOS_CONFIG_PATH !== configPath) problems.push(`settings.json: env.LIFEOS_CONFIG_PATH is ${settings.env?.LIFEOS_CONFIG_PATH}, expected ${configPath} (else LifeOS reads ~/.claude's config)`);
   else if (!existsSync(configPath)) problems.push(`${configPath}: missing (LIFEOS_CONFIG_PATH points at it)`);
   for (const [event, groups] of Object.entries((settings.hooks ?? {}) as Record<string, any[]>)) {
     for (const g of groups ?? []) {

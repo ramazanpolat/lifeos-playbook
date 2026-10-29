@@ -14,7 +14,8 @@ KEEP=0
 command -v cpb >/dev/null || { echo "cpb.sh: cpb not on PATH" >&2; exit 2; }
 command -v bun >/dev/null || { echo "cpb.sh: bun not on PATH" >&2; exit 2; }
 
-SANDBOX="$(mktemp -d -t lifeos-cpb-XXXXXX)"
+# Resolved: on macOS the temp dir is reached through a symlink (/var -> /private/var).
+SANDBOX="$(cd "$(mktemp -d -t lifeos-cpb-XXXXXX)" && pwd -P)"
 export HOME="$SANDBOX/home" TMPDIR="$SANDBOX/tmp"
 mkdir -p "$HOME" "$TMPDIR" "$SANDBOX/bin"
 CPB_BIN_DIR="$(dirname "$(command -v cpb)")"
