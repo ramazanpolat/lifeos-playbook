@@ -10,6 +10,7 @@ import {
   pickComponents,
   preserveKeys,
   rebaseSettings,
+  stripSection,
   playbookSection,
   rebaseDefaultRoot,
   upsertSection,
@@ -46,6 +47,13 @@ describe("rebaseDefaultRoot", () => {
     expect(rebaseDefaultRoot("lives in ~/.claude.", HOME, ROOT).text).toBe(`lives in ${ROOT}.`);
   });
 
+  test("a home path inside another path is not the default root", () => {
+    const src = "/backup/home/user/.claude/skills/LifeOS/install/USER";
+    expect(rebaseDefaultRoot(src, HOME, ROOT)).toEqual({ text: src, count: 0 });
+    expect(rebaseDefaultRoot("x/~/.claude y", HOME, ROOT).count).toBe(0);
+    expect(rebaseDefaultRoot("KEY=$HOME/.claude/x", HOME, ROOT).text).toBe(`KEY=${ROOT}/x`);
+  });
+
   test("a dot followed by a word is a different file", () => {
     expect(rebaseDefaultRoot("~/.claude.json ~/.claude.bak/x", HOME, ROOT).count).toBe(0);
   });
@@ -80,6 +88,16 @@ describe("CLAUDE.md section", () => {
     expect(updated).toContain("9.0.0");
     expect(updated).not.toContain("8.761.0");
     expect(updated.split(SECTION_END).length).toBe(2);
+  });
+
+  test("imports CLAUDE.local.md on a line of its own", () => {
+    expect(section).toMatch(/^@CLAUDE\.local\.md$/m);
+  });
+
+  test("stripSection gives back what upstream wrote", () => {
+    const base = "# LifeOS\n\nbody";
+    expect(stripSection(upsertSection(base + "\n", section))).toBe(base);
+    expect(stripSection(base + "\n\n")).toBe(base);
   });
 
   test("never contains an ActivateImports pattern", () => {
@@ -172,12 +190,12 @@ describe("watch: playbook version", () => {
 });
 
 describe("preserveKeys", () => {
-  test("copies live keys the system layer lacks, once", () => {
-    const live = { claudeMdExcludes: ["/home/user/.claude/CLAUDE.md"], model: "opus", env: {} };
-    const system = { model: "sonnet" };
+  test("copies live values that override the system layer, once", () => {
+    const live = { claudeMdExcludes: ["/home/user/.claude/**"], model: "opus", agent: "x", env: {} };
+    const system = { model: "sonnet", agent: "x" };
     const layer: Record<string, unknown> = {};
-    expect(preserveKeys(live, system, layer, ["claudeMdExcludes", "model", "agent"])).toEqual(["claudeMdExcludes"]);
-    expect(layer).toEqual({ claudeMdExcludes: ["/home/user/.claude/CLAUDE.md"] });
+    expect(preserveKeys(live, system, layer, ["claudeMdExcludes", "model", "agent"])).toEqual(["claudeMdExcludes", "model"]);
+    expect(layer).toEqual({ claudeMdExcludes: ["/home/user/.claude/**"], model: "opus" });
     expect(preserveKeys(live, system, layer, ["claudeMdExcludes", "model", "agent"])).toEqual([]);
   });
 });

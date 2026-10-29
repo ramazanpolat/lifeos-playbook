@@ -4,14 +4,20 @@
  *
  *   bun playbook/watch.ts                         # report pinned vs latest; exit 0 current, 10 newer
  *   bun playbook/watch.ts --candidate-out <file>  # same, and write a newer release as a candidate pin
- *   bun playbook/watch.ts --apply <file>          # make a tested candidate the pin; bump .playbook version
- *   bun playbook/watch.ts --bump                  # all three locally: detect, run e2e, apply
+ *   bun playbook/watch.ts --bump                  # detect, then run the e2e suite on this machine's OS;
+ *                                                 # keeps the candidate file, does not pin
+ *   bun playbook/watch.ts --apply <file>          # make a candidate the pin; bump .playbook version
+ *
+ * Pinning needs the e2e suite green on Linux AND macOS for that exact candidate: the
+ * upstream-watch workflow runs --apply only after both matrix jobs pass. A local --bump
+ * covers one OS, so it never pins; --apply by hand is an override for when both were run.
  *
  * A release counts as new when its version is higher than the pin, or when its tag now
  * points at a different commit (upstream force-moves release tags). Git and PR work is
  * left to the caller (.github/workflows/upstream-watch.yml); this script only edits files.
  *
- * Exit: 0 nothing to do, 10 newer release found, 11 pin applied, 12 e2e failed, 1 error.
+ * Exit: 0 nothing to do, 10 newer release found (with --bump: and it passed e2e here), 11 pin
+ *       applied, 12 e2e failed, 1 error.
  */
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -92,16 +98,14 @@ async function main(): Promise<number> {
 
   const candidate = out ?? join(here, `.candidate-${latest.version}.json`);
   if (!out) writePin(candidate, latest);
-  try {
-    if (!e2e(candidate)) {
-      say("e2e failed; pin unchanged");
-      return 12;
-    }
-    apply(candidate);
-    return 11;
-  } finally {
+  if (!e2e(candidate)) {
+    say("e2e failed; pin unchanged");
     if (!out) rmSync(candidate, { force: true });
+    return 12;
   }
+  say(`e2e passed on ${process.platform}; pin unchanged. Pinning needs both OSes: the upstream-watch workflow does it,`);
+  say(`or run the suite on the other OS too, then: bun playbook/watch.ts --apply ${candidate}`);
+  return 10;
 }
 
 if (import.meta.main) {

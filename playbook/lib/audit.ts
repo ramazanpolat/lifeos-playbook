@@ -102,6 +102,9 @@ export function auditInside(root: string, home: string, userData: string): strin
   const settings = JSON.parse(readFileSync(join(root, "settings.json"), "utf8")) as Record<string, any>;
   if (settings.env?.LIFEOS_CONFIG_DIR !== userData) problems.push(`settings.json: env.LIFEOS_CONFIG_DIR is ${settings.env?.LIFEOS_CONFIG_DIR}, expected ${userData}`);
   if (settings.env?.LIFEOS_DIR !== join(root, "LIFEOS")) problems.push(`settings.json: env.LIFEOS_DIR is ${settings.env?.LIFEOS_DIR}, expected ${join(root, "LIFEOS")}`);
+  const configPath = join(userData, "USER", "CONFIG", "LIFEOS_CONFIG.toml");
+  if (settings.env?.LIFEOS_CONFIG_PATH !== configPath) problems.push(`settings.json: env.LIFEOS_CONFIG_PATH is ${settings.env?.LIFEOS_CONFIG_PATH}, expected ${configPath} (else LifeOS reads ~/.claude's config)`);
+  else if (!existsSync(configPath)) problems.push(`${configPath}: missing (LIFEOS_CONFIG_PATH points at it)`);
   for (const [event, groups] of Object.entries((settings.hooks ?? {}) as Record<string, any[]>)) {
     for (const g of groups ?? []) {
       for (const h of g?.hooks ?? []) {

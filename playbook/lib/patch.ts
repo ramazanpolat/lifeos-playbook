@@ -13,12 +13,13 @@ function escapeRe(s: string): string {
  * Every spelling upstream uses for the default config root, boundary-anchored:
  * `~/.claude`, `$HOME/.claude`, `${HOME}/.claude` and `<home>/.claude`, followed by
  * `/`, a quote or backtick, whitespace, a closing bracket, `>`, `,`, `:`, `;`, a
- * sentence-final `.`, or end of string. `.claude-playbooks`, `.claude.json` and
- * `.claudeX` never match.
+ * sentence-final `.`, or end of string, and not preceded by a path character.
+ * `.claude-playbooks`, `.claude.json`, `.claudeX` and `/backup/<home>/.claude` never match.
  */
 export function defaultRootPattern(home: string): RegExp {
   const prefixes = ["\\$\\{HOME\\}", "\\$HOME", "~", escapeRe(home.replace(/\/+$/, ""))];
-  return new RegExp(`(?:${prefixes.join("|")})/\\.claude(?=[/"'\`\\s)\\]}>,:;]|\\.(?!\\w)|$)`, "g");
+  // Left boundary: a home path inside another path (/backup/home/user/.claude) is not the default root.
+  return new RegExp(`(?<![\\w./~$])(?:${prefixes.join("|")})/\\.claude(?=[/"'\`\\s)\\]}>,:;]|\\.(?!\\w)|$)`, "g");
 }
 
 /** Rewrite every default-root spelling to the playbook root. */
@@ -66,8 +67,19 @@ export function playbookSection(o: { root: string; userData: string; version: st
     "- Update with `cpb update <playbook-name>`; it re-runs the converter on the newly pinned release.",
     "- Never write to `~/.claude`: it is a different Claude Code profile.",
     "- Background services (Pulse, launchd jobs), the Helm terminal layer and the shell alias are not installed: they write outside the config root.",
+    "- Personal instructions go in `CLAUDE.local.md` beside this file: updates replace CLAUDE.md with upstream's template, never CLAUDE.local.md.",
+    "",
+    "@CLAUDE.local.md",
     SECTION_END,
   ].join("\n");
+}
+
+/** The document without the playbook section (to compare what upstream wrote). */
+export function stripSection(claudeMd: string): string {
+  const b = claudeMd.indexOf(SECTION_BEGIN);
+  const e = claudeMd.indexOf(SECTION_END);
+  if (b < 0 || e < b) return claudeMd.replace(/\s*$/, "");
+  return (claudeMd.slice(0, b) + claudeMd.slice(e + SECTION_END.length)).replace(/\s*$/, "");
 }
 
 /** Insert or replace the playbook section; idempotent. */
@@ -98,13 +110,15 @@ export function pickComponents(wanted: readonly string[], offered: readonly stri
 }
 
 /**
- * Copy `keys` from the live settings into the user layer when the system layer does not
- * define them (a system key would win the merge anyway). Returns the keys copied.
+ * Copy `keys` from the live settings into the user layer when their value differs from the
+ * system layer's (the user layer wins the merge, key by key). A value equal to the system
+ * default is left out so a later default change still reaches the install. Returns the keys copied.
  */
 export function preserveKeys(live: Record<string, unknown>, system: Record<string, unknown>, layer: Record<string, unknown>, keys: readonly string[]): string[] {
   const copied: string[] = [];
   for (const k of keys) {
-    if (!(k in live) || k in system) continue;
+    if (!(k in live)) continue;
+    if (k in system && JSON.stringify(system[k]) === JSON.stringify(live[k])) continue;
     if (JSON.stringify(layer[k]) === JSON.stringify(live[k])) continue;
     layer[k] = live[k];
     copied.push(k);

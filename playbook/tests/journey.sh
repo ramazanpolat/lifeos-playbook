@@ -97,7 +97,12 @@ step "3. what a user sees if they launch before converting (the bootstrap CLAUDE
 run "bootstrap CLAUDE.md" 0 cat "$ROOT/CLAUDE.md"
 
 step "4. the plan"
-run "convert --plan" 0 bun "$ROOT/playbook/convert.ts" --plan
+if [ "$(uname -s)" = Linux ] && ! command -v make >/dev/null; then
+  run "convert --plan names the missing toolchain (not ready)" 2 bun "$ROOT/playbook/convert.ts" --plan
+  check "the plan was still printed" grep -q "plan only: components" "$TRANSCRIPT"
+else
+  run "convert --plan (ready)" 0 bun "$ROOT/playbook/convert.ts" --plan
+fi
 
 if [ "$(uname -s)" = Linux ] && ! command -v make >/dev/null; then
   step "5. converting before installing the Linux toolchain (a likely first mistake)"

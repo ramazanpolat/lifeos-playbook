@@ -40,6 +40,25 @@ json() { bun -e "const j=JSON.parse(require('fs').readFileSync('$1','utf8')); co
 pin_version() { json "$1" "j.version"; }
 sha() { if command -v sha256sum >/dev/null; then sha256sum "$@"; else shasum -a 256 "$@"; fi | cut -d' ' -f1; }
 
+# Run the SessionStart settings rebuild (SettingsBackport; MergeSettings) as Claude Code would.
+session_rebuild() { # session_rebuild <root>
+  local hook
+  hook="$(bun -e "const s=require('$1/settings.json'); for (const g of s.hooks?.SessionStart ?? []) for (const h of g.hooks ?? []) if (/MergeSettings/.test(h.command)) console.log(h.command)")"
+  [ -n "$hook" ] && (cd "$1" && CLAUDE_CONFIG_DIR="$1" sh -c "$hook") >/dev/null 2>&1
+}
+
+# Where upstream's own resolver puts the USER tree, with a decoy LifeOS in a default profile.
+resolve_user_dir() { # resolve_user_dir <root>
+  local decoy="$SANDBOX/decoy-home"
+  mkdir -p "$decoy/.claude/LIFEOS/USER/CONFIG"
+  sed "s|^user_dir = .*|user_dir = \"$decoy/.claude/LIFEOS/USER\"|" "$1/user-data/USER/CONFIG/LIFEOS_CONFIG.toml" > "$decoy/.claude/LIFEOS/USER/CONFIG/LIFEOS_CONFIG.toml"
+  (cd "$1" && HOME="$decoy" bun -e "
+    const s = require('$1/settings.json');
+    Object.assign(process.env, s.env ?? {}, { CLAUDE_CONFIG_DIR: '$1' });
+    const { lifeosUserDir } = await import('$1/LIFEOS/TOOLS/LifeosConfig.ts');
+    console.log(lifeosUserDir());")
+}
+
 # A root laid out the way `cpb CREATE PLAYBOOK ... FROM <git url>` leaves it: the tracked
 # files plus their own .git.
 stage_root() { # stage_root <root> <pin>
@@ -96,7 +115,15 @@ if [ "$FRESH_OK" -eq 1 ]; then
   hcode=0
   bun "$ROOT/playbook/tests/hook-smoke.ts" --root "$ROOT" >"$SANDBOX/hooks.log" 2>&1 || hcode=$?
   grep -vE '^  ok ' "$SANDBOX/hooks.log" | sed 's/^/        /'
-  check "fresh: every command hook exits 0" test "$hcode" = 0
+  check "fresh: every command hook exits 0 and the expected ones are registered" test "$hcode" = 0
+  RESOLVED="$(resolve_user_dir "$ROOT")"
+  echo "        LifeOS resolves its USER tree to: ${RESOLVED/#$SANDBOX/<sandbox>}"
+  check "fresh: LifeOS reads its own config, not a default-profile LifeOS" bash -c "[[ '$RESOLVED' == '$ROOT'/* ]]"
+
+  echo "== a user's own changes: a settings.json edit and CLAUDE.local.md"
+  bun -e "const f='$ROOT/settings.json', fs=require('fs'), s=JSON.parse(fs.readFileSync(f,'utf8')); s.env.E2E_USER_SETTING='kept'; fs.writeFileSync(f, JSON.stringify(s,null,2)+'\n')"
+  echo "e2e personal instruction" > "$ROOT/CLAUDE.local.md"
+  session_rebuild "$ROOT"
 
   echo "== rerun (idempotent; InstallAll takes its upgrade chain now)"
   S1="$(sha "$ROOT/settings.json" "$ROOT/CLAUDE.md")"
@@ -104,6 +131,11 @@ if [ "$FRESH_OK" -eq 1 ]; then
   S2="$(sha "$ROOT/settings.json" "$ROOT/CLAUDE.md")"
   check "rerun: settings.json and CLAUDE.md unchanged" test "$S1" = "$S2"
   assert_converted "$ROOT" "$V" "rerun"
+  session_rebuild "$ROOT"
+  check "rerun: the settings edit survives the first rebuild after an upgrade" test "$(json "$ROOT/settings.json" 'j.env.E2E_USER_SETTING')" = kept
+  check "rerun: CLAUDE.local.md untouched" test "$(cat "$ROOT/CLAUDE.local.md")" = "e2e personal instruction"
+  check "rerun: CLAUDE.md still imports CLAUDE.local.md" grep -qx '@CLAUDE.local.md' "$ROOT/CLAUDE.md"
+  check "rerun: LifeOS still reads its own config" bash -c "[[ '$(resolve_user_dir "$ROOT")' == '$ROOT'/* ]]"
 
   echo "== Doctor (informational)"
   (cd "$ROOT" && CLAUDE_CONFIG_DIR="$ROOT" bun LIFEOS/TOOLS/Doctor.ts 2>&1 | tail -n 15 | sed 's/^/        /') || true

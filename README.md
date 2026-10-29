@@ -33,11 +33,19 @@ What the conversion does, and leaves out:
 - components that write outside the root left out: `statusline`, `helm`, `pulse`,
   `worksweep`, `derivedsync`;
 - `~/.claude` paths in `settings.json` and `settings.system.json` rewritten to the playbook root;
+- `LIFEOS_CONFIG_PATH` pinned to the playbook's own config (upstream otherwise reads
+  `~/.claude/LIFEOS/USER/CONFIG/LIFEOS_CONFIG.toml`, whatever `CLAUDE_CONFIG_DIR` says);
 - an audit after every run: nothing inside points at `~/.claude`, nothing outside changed.
+
+Personal instructions go in `CLAUDE.local.md` next to `CLAUDE.md`. Updates replace
+`CLAUDE.md` with upstream's template (the old one is backed up in `.lifeos-overlay-backups/`);
+`CLAUDE.local.md` is imported from it and never touched.
 
 The one thing that does land outside is package-manager cache: `bun install` and node-gyp
 use their usual cache directories (`~/.bun`, `~/.cache`, `~/Library/Caches`), shared with
-every other project on the machine. No LifeOS state or configuration goes there.
+every other project on the machine. No LifeOS state or configuration goes there. One upstream
+hook also writes a session timestamp to `/tmp/lifeos-session-start.txt`, shared by every LifeOS
+install on the machine; the hook smoke test reports it.
 
 ## Layout
 

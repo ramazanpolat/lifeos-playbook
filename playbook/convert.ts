@@ -23,13 +23,14 @@
  *   6. append the playbook section to CLAUDE.md
  *   7. audit: nothing inside points at ~/.claude, nothing outside the root changed
  *
- * Exit: 0 converted and clean, 1 failed, 2 refused (preflight), 3 converted but the audit found problems.
+ * Exit: 0 converted and clean (with --plan: ready), 1 failed, 2 refused (preflight; with --plan:
+ *       not ready, the missing prerequisite is named), 3 converted but the audit found problems.
  */
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { auditInside, diffSnapshots, snapshot } from "./lib/audit";
-import { coreServices, forceEnv, isBootstrap, pickComponents, playbookSection, preserveKeys, rebaseDefaultRoot, rebaseSettings, upsertSection } from "./lib/patch";
+import { coreServices, forceEnv, isBootstrap, pickComponents, playbookSection, preserveKeys, rebaseDefaultRoot, rebaseSettings, stripSection, upsertSection } from "./lib/patch";
 import { compareVersions, fetchCommit, readPin, stamp, verifyLocalSource } from "./lib/pin";
 import { run } from "./lib/sh";
 
@@ -91,15 +92,30 @@ function preflight(root: string, home: string): void {
   if (/\s/.test(root)) throw new Refusal(`playbook root contains whitespace (${root}); upstream hook commands would break`);
   const def = join(home, ".claude");
   if (existsSync(def) && realpathSync(root) === realpathSync(def)) throw new Refusal("refusing to convert the default profile ~/.claude");
+  // Every path the conversion writes must stay inside the root, symlinks resolved: a
+  // settings.json linked to ~/.claude/settings.json would be written through.
+  const realRoot = realpathSync(root);
+  for (const rel of ["settings.json", "settings.system.json", "CLAUDE.md", USER_DATA, STATE_DIR, "LIFEOS", "skills", "hooks", "agents", "commands", "workflows", ".git", ".gitignore"]) {
+    const p = join(root, rel);
+    if (!existsSync(p)) continue;
+    const real = realpathSync(p);
+    if (real !== realRoot && !real.startsWith(realRoot + "/")) throw new Refusal(`${rel} resolves outside the playbook (${real}); the conversion would write through it`);
+  }
   const v = run("bun", ["--version"], { capture: true }).stdout.trim();
   const [maj, min] = v.split(".").map(Number);
   if (maj < BUN_MIN[0] || (maj === BUN_MIN[0] && min < BUN_MIN[1])) throw new Refusal(`bun ${v} is too old; LifeOS needs ${BUN_MIN.join(".")}+`);
   run("git", ["--version"], { capture: true });
+}
+
+/** Prerequisites the conversion needs but --plan only reports. */
+function missingPrerequisites(): string[] {
+  const out: string[] = [];
   // node-pty (Pulse Desktop) has no Linux prebuild: upstream's DeployCore compiles it with node-gyp.
   if (process.platform === "linux") {
     const missing = ["make", "g++"].filter((t) => run("sh", ["-c", `command -v ${t}`], { capture: true, allowFail: true }).code !== 0);
-    if (missing.length) throw new Refusal(`LifeOS's installer compiles node-pty on Linux and needs ${missing.join(" and ")} (e.g. apt install build-essential)`);
+    if (missing.length) out.push(`LifeOS's installer compiles node-pty on Linux and needs ${missing.join(" and ")}: install them first (Debian/Ubuntu: sudo apt install build-essential)`);
   }
+  return out;
 }
 
 /** Same rule InstallAll uses: VERSION, settings.json and a live LIFEOS/USER. */
@@ -123,13 +139,27 @@ function writeJson(p: string, v: unknown): void {
   writeFileSync(p, JSON.stringify(v, null, 2) + "\n");
 }
 
+/**
+ * The env every LifeOS process in this playbook needs, pinned in settings.json, the system
+ * layer and the user layer. LIFEOS_CONFIG_PATH matters most: LifeosConfig.ts defaults to
+ * ~/.claude/LIFEOS/USER/CONFIG/LIFEOS_CONFIG.toml whatever CLAUDE_CONFIG_DIR says, and
+ * lifeosUserDir() falls back to ~/.claude/LIFEOS/USER when that file is missing.
+ */
+function rootEnvFor(root: string, userData: string): Record<string, string> {
+  return {
+    LIFEOS_CONFIG_DIR: userData,
+    LIFEOS_DIR: join(root, "LIFEOS"),
+    LIFEOS_CONFIG_PATH: join(userData, "USER", "CONFIG", "LIFEOS_CONFIG.toml"),
+  };
+}
+
 /** Environment for every upstream process: config root, data home and temp dir inside the root. */
 function upstreamEnv(root: string, userData: string, tmp: string): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = { ...process.env };
   // Each of these outranks or redirects the config root (TOOLS/Paths.ts, OverlaySystem, InstallHooks).
-  for (const k of ["LIFEOS_DIR", "LIFEOS_CONFIG_PATH", "CLAUDE_PLUGIN_ROOT", "LIFEOS_HARNESS", "LIFEOS_TAG", "LIFEOS_TARBALL_URL", "LIFEOS_EXPECTED_SHA256", "DRY_RUN"]) delete env[k];
+  for (const k of ["CLAUDE_PLUGIN_ROOT", "LIFEOS_HARNESS", "LIFEOS_TAG", "LIFEOS_TARBALL_URL", "LIFEOS_EXPECTED_SHA256", "DRY_RUN"]) delete env[k];
+  Object.assign(env, rootEnvFor(root, userData));
   env.CLAUDE_CONFIG_DIR = root;
-  env.LIFEOS_CONFIG_DIR = userData;
   env.LIFEOS_SKILLS_DIR = join(root, "skills");
   env.TMPDIR = tmp;
   // Pulse Desktop is not installed; skip its 100 MB Electron download into the user cache.
@@ -137,20 +167,32 @@ function upstreamEnv(root: string, userData: string, tmp: string): Record<string
   return env;
 }
 
+/** Exclusive lock: created atomically, released only by its owner, a dead owner's lock taken over. */
 function lock(stateDir: string): () => void {
   const f = join(stateDir, "convert.lock");
-  if (existsSync(f)) {
+  const mine = String(process.pid);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      writeFileSync(f, mine, { flag: "wx" });
+      return () => {
+        try {
+          if (readFileSync(f, "utf8").trim() === mine) rmSync(f, { force: true });
+        } catch {}
+      };
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    }
     const pid = Number(readFileSync(f, "utf8").trim());
     let alive = false;
     try {
       process.kill(pid, 0);
       alive = true;
     } catch {}
-    if (alive) throw new Refusal(`another conversion is running (pid ${pid}); lock ${f}`);
-    log(`removing stale lock of pid ${pid}`);
+    if (alive) throw new Refusal(`another conversion is running (pid ${pid}); wait for it to finish, or remove ${f} if that process is not a conversion`);
+    log(`taking over the lock of pid ${pid}, which is no longer running (an interrupted conversion)`);
+    rmSync(f, { force: true });
   }
-  writeFileSync(f, String(process.pid));
-  return () => rmSync(f, { force: true });
+  throw new Refusal(`could not take the lock ${f}: another conversion started at the same moment`);
 }
 
 interface InstallStep {
@@ -244,10 +286,17 @@ function main(): number {
   log(`user data ${userData}`);
   log(`source    ${o.src ?? `fetch github.com/${pin.repo} ${pin.commit}`}`);
   if (o.migrateFrom || o.migrateTo) log(`cpb update ${o.migrateFrom ?? "?"} -> ${o.migrateTo ?? "?"}`);
+  const missingPrereqs = missingPrerequisites();
   if (o.plan) {
     log(`plan only: components ${WANTED_COMPONENTS.join(",")} (minus any the release lacks); all core services declined`);
+    if (missingPrereqs.length) {
+      for (const m of missingPrereqs) log(`not ready: ${m}`);
+      return 2;
+    }
+    log("ready: run the same command without --plan to convert");
     return 0;
   }
+  if (missingPrereqs.length) throw new Refusal(missingPrereqs.join("; "));
 
   mkdirSync(stateDir, { recursive: true });
   const unlock = lock(stateDir);
@@ -274,17 +323,28 @@ function main(): number {
     rmSync(tmp, { recursive: true, force: true });
     mkdirSync(tmp, { recursive: true });
     const claudeMd = join(root, "CLAUDE.md");
+    let claudeBefore: string | null = null;
     if (existsSync(claudeMd) && isBootstrap(readFileSync(claudeMd, "utf8"))) {
       // InstallSettings writes upstream's CLAUDE.md only when none exists.
       renameSync(claudeMd, join(stateDir, "bootstrap-CLAUDE.md"));
+    } else if (existsSync(claudeMd)) {
+      claudeBefore = stripSection(readFileSync(claudeMd, "utf8"));
     }
+    const rootEnv = rootEnvFor(root, userData);
     const settingsPath = join(root, "settings.json");
     const settings = readJson(settingsPath);
-    forceEnv(settings, { LIFEOS_CONFIG_DIR: userData, LIFEOS_DIR: join(root, "LIFEOS") });
+    forceEnv(settings, rootEnv);
     writeJson(settingsPath, settings);
     if (!existsSync(join(root, ".git"))) run("git", ["init", "-q", root], { capture: true });
 
     const env = upstreamEnv(root, userData, tmp);
+    const snapshotPath = join(root, "LIFEOS", "MEMORY", "STATE", "settings-merge-snapshot.json");
+    if (installed && existsSync(snapshotPath)) {
+      // Fold hand edits made since the last merge into the user layer before anything rewrites
+      // settings.json -- the same backport upstream's SessionStart hook runs.
+      const b = run("bun", [join(root, "LIFEOS/TOOLS/SettingsBackport.ts")], { cwd: root, env, capture: true, allowFail: true });
+      log(`settings backport before upgrade: ${(b.stdout || b.stderr).trim().split("\n").pop() ?? `exit ${b.code}`}`);
+    }
 
     // 3. Place the skill with the release's own installer.
     log("placing the skill (release install.sh)");
@@ -317,7 +377,6 @@ function main(): number {
     installAll(installArgs, root, env);
 
     // 5. Rebase what upstream leaves pointing at ~/.claude.
-    const rootEnv = { LIFEOS_CONFIG_DIR: userData, LIFEOS_DIR: join(root, "LIFEOS") };
     for (const f of ["settings.json", "settings.system.json"]) {
       const p = join(root, f);
       if (!existsSync(p)) continue;
@@ -347,11 +406,24 @@ function main(): number {
       if (changed) writeJson(p, layer);
     }
 
-    // 6. CLAUDE.md section.
+    // 6. CLAUDE.md section. Upstream's upgrade overwrites CLAUDE.md with its template (the old
+    // one goes to .lifeos-overlay-backups/); the section imports CLAUDE.local.md, which nothing
+    // overwrites, so personal instructions belong there.
+    let claudeReplaced = false;
     if (existsSync(claudeMd)) {
-      writeFileSync(claudeMd, upsertSection(readFileSync(claudeMd, "utf8"), playbookSection({ root, userData, version: pin.version, commit: pin.commit })));
+      const current = readFileSync(claudeMd, "utf8");
+      claudeReplaced = claudeBefore !== null && claudeBefore !== stripSection(current);
+      writeFileSync(claudeMd, upsertSection(current, playbookSection({ root, userData, version: pin.version, commit: pin.commit })));
+      if (claudeReplaced)
+        log("CLAUDE.md now holds upstream's template; the previous one is in .lifeos-overlay-backups/. Keep personal instructions in CLAUDE.local.md, which updates never touch");
     }
     pruneSkillBackups(root);
+
+    // A merge snapshot equal to the converted settings.json: hand edits made from here on are
+    // drift that upstream's SessionStart backport carries into the user layer. Without one the
+    // backport skips and the first rebuild after an upgrade drops those edits.
+    mkdirSync(dirname(snapshotPath), { recursive: true });
+    writeJson(snapshotPath, readJson(settingsPath));
 
     // 7. Audit.
     const inside = auditInside(root, home, userData);
@@ -365,6 +437,7 @@ function main(): number {
       from: installed,
       components: use,
       declinedServices: declined,
+      claudeMdReplaced: claudeReplaced,
       problems,
     });
     ok = true;

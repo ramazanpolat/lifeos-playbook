@@ -7,11 +7,13 @@
  *
  *   bun playbook/tests/hook-smoke.ts --root <playbook root>
  *
- * Exit: 0 every hook exited 0, 1 a hook crashed, timed out or blocked, 2 usage.
- * HTTP hooks are listed and skipped: upstream designs them to fail open.
+ * Exit: 0 every hook exited 0, 1 a hook crashed, timed out or blocked, or the hook set is
+ * empty or lacks the SessionStart settings rebuild; 2 usage. HTTP hooks are listed and
+ * skipped: upstream designs them to fail open. Files a hook leaves in /tmp are reported
+ * (upstream writes /tmp/lifeos-session-start.txt, shared by every install on the machine).
  */
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const args = process.argv.slice(2);
@@ -21,11 +23,29 @@ if (i < 0 || !args[i + 1]) {
   process.exit(2);
 }
 const root = resolve(args[i + 1]);
-const settings = JSON.parse(readFileSync(join(root, "settings.json"), "utf8")) as { hooks?: Record<string, Array<{ matcher?: string; hooks?: Array<Record<string, unknown>> }>> };
+const settings = JSON.parse(readFileSync(join(root, "settings.json"), "utf8")) as {
+  env?: Record<string, string>;
+  hooks?: Record<string, Array<{ matcher?: string; hooks?: Array<Record<string, unknown>> }>>;
+};
+// Claude Code exports settings.json's env to every hook process.
+const hookEnv = { ...process.env, ...(settings.env ?? {}), CLAUDE_CONFIG_DIR: root };
+const tmpLifeos = () => new Set(readdirSync("/tmp").filter((n) => /lifeos|pai-/i.test(n)));
+const tmpBefore = tmpLifeos();
 const project = join(root, ".lifeos-playbook", "smoke-project");
 mkdirSync(project, { recursive: true });
 const sessionId = "00000000-0000-4000-8000-000000000000";
 const transcript = join(project, "transcript.jsonl");
+// Claude Code always hands hooks an existing transcript; Stop and SessionEnd hooks parse it.
+const now = new Date().toISOString();
+const turn = (type: "user" | "assistant", uuid: string, parentUuid: string | null, content: unknown) =>
+  JSON.stringify({ type, uuid, parentUuid, sessionId, timestamp: now, cwd: project, isSidechain: false, userType: "external", version: "2.1.0", message: { role: type, content } });
+writeFileSync(
+  transcript,
+  [
+    turn("user", "11111111-1111-4111-8111-111111111111", null, "What should I work on today?"),
+    turn("assistant", "22222222-2222-4222-8222-222222222222", "11111111-1111-4111-8111-111111111111", [{ type: "text", text: "Start with the item marked urgent in your TELOS." }]),
+  ].join("\n") + "\n",
+);
 
 /** A plausible tool call for a PreToolUse/PostToolUse matcher such as "Bash" or "Edit|Write". */
 function toolFor(matcher: string | undefined): { tool_name: string; tool_input: Record<string, unknown> } {
@@ -93,7 +113,7 @@ for (const [event, groups] of Object.entries(settings.hooks ?? {})) {
       const r = spawnSync("sh", ["-c", command], {
         cwd: project,
         input: JSON.stringify(payload(event, g.matcher)),
-        env: { ...process.env, CLAUDE_CONFIG_DIR: root, CLAUDE_PROJECT_DIR: project },
+        env: { ...hookEnv, CLAUDE_PROJECT_DIR: project },
         encoding: "utf8",
         timeout: timeoutS * 1000,
         maxBuffer: 16 * 1024 * 1024,
@@ -114,5 +134,13 @@ for (const [event, groups] of Object.entries(settings.hooks ?? {})) {
 }
 console.log(`hook-smoke: ${ran} command hook(s) in ${root}`);
 for (const r of rows) console.log(r);
-console.log(`hook-smoke: ${ran - failed} ok, ${failed} failed`);
-process.exit(failed ? 1 : 0);
+// A release that stopped registering hooks would otherwise pass with nothing run.
+const sessionStart = (settings.hooks?.SessionStart ?? []).flatMap((g) => g.hooks ?? []).map((h) => String(h.command ?? ""));
+const missing: string[] = [];
+if (ran === 0) missing.push("no command hooks are registered");
+if (!sessionStart.some((c) => /MergeSettings/.test(c))) missing.push("SessionStart does not run the settings rebuild (MergeSettings)");
+for (const m of missing) console.log(`  MISSING ${m}`);
+const tmpNew = [...tmpLifeos()].filter((n) => !tmpBefore.has(n));
+if (tmpNew.length) console.log(`  note   hooks wrote outside the playbook, in /tmp: ${tmpNew.join(", ")} (upstream's shared session timestamp)`);
+console.log(`hook-smoke: ${ran - failed} ok, ${failed} failed${missing.length ? `, ${missing.length} expected registration(s) missing` : ""}`);
+process.exit(failed || missing.length ? 1 : 0);
