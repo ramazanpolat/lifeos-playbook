@@ -39,6 +39,13 @@ check() { # check <name> <command...>
 json() { bun -e "const j=JSON.parse(require('fs').readFileSync('$1','utf8')); console.log($2)"; }
 pin_version() { json "$1" "j.version"; }
 sha() { if command -v sha256sum >/dev/null; then sha256sum "$@"; else shasum -a 256 "$@"; fi | cut -d' ' -f1; }
+# settings.json by meaning: keys sorted, so a rewrite in another key order counts as unchanged.
+canon() { bun -e "const s=(v)=>Array.isArray(v)?v.map(s):v&&typeof v==='object'?Object.fromEntries(Object.keys(v).sort().map(k=>[k,s(v[k])])):v; console.log(JSON.stringify(s(JSON.parse(require('fs').readFileSync('$1','utf8')))))"; }
+# Key paths whose values differ between two JSON files (for a failing idempotency check).
+json_diff() { bun -e "
+  const fs=require('fs'), a=JSON.parse(fs.readFileSync('$1','utf8')), b=JSON.parse(fs.readFileSync('$2','utf8'));
+  const walk=(x,y,p)=>{ if (JSON.stringify(x)===JSON.stringify(y)) return; if (x&&y&&typeof x==='object'&&typeof y==='object'&&!Array.isArray(x)&&!Array.isArray(y)) { for (const k of new Set([...Object.keys(x),...Object.keys(y)])) walk(x[k],y[k],p+'.'+k); } else console.log('        changed: '+p+': '+JSON.stringify(x)?.slice(0,80)+' -> '+JSON.stringify(y)?.slice(0,80)); };
+  walk(a,b,'settings');"; }
 
 # Run the SessionStart settings rebuild (SettingsBackport; MergeSettings) as Claude Code would.
 session_rebuild() { # session_rebuild <root>
@@ -134,10 +141,12 @@ if [ "$FRESH_OK" -eq 1 ]; then
   session_rebuild "$ROOT"
 
   echo "== rerun (idempotent; InstallAll takes its upgrade chain now)"
-  S1="$(sha "$ROOT/settings.json" "$ROOT/CLAUDE.md")"
+  S1="$(canon "$ROOT/settings.json")"; C1="$(sha "$ROOT/CLAUDE.md")"; cp "$ROOT/settings.json" "$SANDBOX/settings.before-rerun.json"
   if convert "$ROOT" "$SANDBOX/rerun.log"; then check "rerun: convert exits 0" true; else check "rerun: convert exits 0" false; fi
-  S2="$(sha "$ROOT/settings.json" "$ROOT/CLAUDE.md")"
-  check "rerun: settings.json and CLAUDE.md unchanged" test "$S1" = "$S2"
+  S2="$(canon "$ROOT/settings.json")"; C2="$(sha "$ROOT/CLAUDE.md")"
+  check "rerun: settings.json unchanged in meaning" test "$S1" = "$S2"
+  [ "$S1" = "$S2" ] || json_diff "$SANDBOX/settings.before-rerun.json" "$ROOT/settings.json"
+  check "rerun: CLAUDE.md unchanged" test "$C1" = "$C2"
   assert_converted "$ROOT" "$V" "rerun"
   session_rebuild "$ROOT"
   check "rerun: the settings edit survives the first rebuild after an upgrade" test "$(json "$ROOT/settings.json" 'j.env.E2E_USER_SETTING')" = kept
