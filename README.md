@@ -43,9 +43,13 @@ Personal instructions go in `CLAUDE.local.md` next to `CLAUDE.md`. Updates repla
 
 The one thing that does land outside is package-manager cache: `bun install` and node-gyp
 use their usual cache directories (`~/.bun`, `~/.cache`, `~/Library/Caches`), shared with
-every other project on the machine. No LifeOS state or configuration goes there. One upstream
-hook also writes a session timestamp to `/tmp/lifeos-session-start.txt`, shared by every LifeOS
-install on the machine; the hook smoke test reports it.
+every other project on the machine.
+
+Two upstream behaviours also reach outside, and the converter cannot redirect them without
+patching LifeOS code: about twenty LifeOS subsystems (STATVS, Atlas, Vigil, SendGate, ...)
+keep per-user runtime state in `~/.local/state/lifeos/`, and one hook writes a session
+timestamp to `/tmp/lifeos-session-start.txt`. Both are shared by every LifeOS install of the
+same user; the tests report them by name.
 
 ## Layout
 

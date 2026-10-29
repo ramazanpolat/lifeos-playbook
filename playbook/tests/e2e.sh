@@ -78,12 +78,18 @@ convert() { # convert <root> <log>
   return $code
 }
 
-# Paths under the sandbox HOME that are not the playbook root. Package-manager caches are
-# allowed: bun and node-gyp keep theirs in ~/.bun and ~/.cache on Linux, ~/Library/Caches on macOS.
+# Paths under the sandbox HOME that are not the playbook root. Allowed: package-manager caches
+# (bun and node-gyp: ~/.bun and ~/.cache on Linux, ~/Library/Caches on macOS) and upstream's
+# per-user runtime state in ~/.local/state/lifeos, which ~20 upstream call sites hard-code
+# (reported by known_outside, not hidden).
 outside_root() { # outside_root <root>
   find "$HOME" -mindepth 1 \( -path "$1" -o -path "$HOME/.bun" -o -path "$HOME/.cache" -o -path "$HOME/.npm" \
-      -o -path "$HOME/Library/Caches/bun" -o -path "$HOME/Library/Caches/node-gyp" \) -prune -o -print \
-    | grep -v -x -F -e "$HOME/.claude-playbooks" -e "$HOME/Library" -e "$HOME/Library/Caches" || true
+      -o -path "$HOME/Library/Caches/bun" -o -path "$HOME/Library/Caches/node-gyp" -o -path "$HOME/.local/state/lifeos" \) -prune -o -print \
+    | grep -v -x -F -e "$HOME/.claude-playbooks" -e "$HOME/Library" -e "$HOME/Library/Caches" -e "$HOME/.local" -e "$HOME/.local/state" || true
+}
+known_outside() { # what upstream wrote to its per-user runtime state, for the record
+  [ -d "$HOME/.local/state/lifeos" ] && echo "        note: upstream runtime state in ~/.local/state/lifeos: $(cd "$HOME/.local/state/lifeos" && ls | tr '\n' ' ')"
+  return 0
 }
 
 assert_converted() { # assert_converted <root> <version> <label>
@@ -98,6 +104,7 @@ assert_converted() { # assert_converted <root> <version> <label>
   local out; out="$(outside_root "$root")"
   check "$l: nothing written outside the root" test -z "$out"
   [ -z "$out" ] || echo "$out" | sed 's/^/        outside: /'
+  known_outside
 }
 
 echo "e2e: sandbox $SANDBOX"

@@ -26,7 +26,7 @@
  * Exit: 0 converted and clean (with --plan: ready), 1 failed, 2 refused (preflight; with --plan:
  *       not ready, the missing prerequisite is named), 3 converted but the audit found problems.
  */
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { auditInside, diffSnapshots, snapshot } from "./lib/audit";
@@ -395,7 +395,17 @@ function main(): number {
       }
     }
 
-    // 5. Rebase what upstream leaves pointing at ~/.claude.
+    // 5. Establish the system settings layer on a fresh install too. Upstream creates it only on
+    // upgrade, and until then its SessionStart backport throws (it reads settings.system.json
+    // first) and the rebuild no-ops, so hand edits to settings.json never reach the user layer
+    // and the first rebuild after an upgrade drops them.
+    const systemLayer = join(root, "settings.system.json");
+    if (!existsSync(systemLayer)) {
+      copyFileSync(join(skillRoot, "install/settings.system.json"), systemLayer);
+      log("settings.system.json: established, so the per-session settings rebuild and backport work from the first session");
+    }
+
+    // Rebase what upstream leaves pointing at ~/.claude.
     for (const f of ["settings.json", "settings.system.json"]) {
       const p = join(root, f);
       if (!existsSync(p)) continue;
@@ -415,8 +425,7 @@ function main(): number {
       const layer = rebased.settings;
       let changed = forceEnv(layer, rootEnv).length > 0 || rebased.count > 0;
       const live = readJson(settingsPath);
-      const sysPath = existsSync(join(root, "settings.system.json")) ? join(root, "settings.system.json") : join(skillRoot, "install/settings.system.json");
-      const system = readJson(sysPath);
+      const system = readJson(systemLayer);
       const kept = preserveKeys(live, system, layer, CPB_KEYS);
       if (kept.length) {
         changed = true;
