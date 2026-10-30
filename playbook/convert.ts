@@ -355,7 +355,9 @@ function check(root: string, home: string): number {
   const live = lines.filter((l) => l.includes("✅")).length;
   say(`upstream Doctor, with this playbook's settings: ${live} live, ${broken.length} broken`);
   for (const b of broken) say(`  ${b}`);
-  if (broken.length) say("  (before /LifeOS setup, unrendered identity placeholders are expected; missing optional tools only disable the features Doctor names)");
+  const identity = broken.some((b) => /identity placeholders/i.test(b));
+  if (identity) say("  (identity placeholders stay unrendered until you run /LifeOS setup in a session)");
+  if (broken.length > (identity ? 1 : 0)) say("  (missing optional tools only disable the features Doctor names)");
   say(trouble ? "needs attention: see above" : "healthy");
   return trouble ? 3 : 0;
 }
