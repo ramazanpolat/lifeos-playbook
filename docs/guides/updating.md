@@ -5,7 +5,7 @@ Updates move an existing `lifeos` playbook to a newly pinned upstream LifeOS rel
 ## How a New Upstream Release Reaches an Install
 
 1. **Daily detection and e2e verification**: `.github/workflows/upstream-watch.yml` runs `bun playbook/watch.ts --candidate-out candidate.json` on a daily schedule (`17 5 * * *`) and on manual dispatch. When `danielmiessler/LifeOS` publishes a higher version or moves the current release tag to a new commit, the workflow runs `playbook/tests/e2e.sh` against the candidate on both `ubuntu-latest` and `macos-latest` (testing fresh conversion, hooks, idempotent rerun, and upgrade from the current pin).
-2. **Pin update via pull request**: Only if both OS targets pass `e2e.sh`, the `pin` job runs `bun playbook/watch.ts --apply "$RUNNER_TEMP/candidate.json"`, which updates `playbook/upstream.json` and bumps the `version` field in `.playbook` (for example, `8.761.0+pb.1` to `8.762.0+pb.1`, or `8.761.0+pb.2` if the same upstream tag moved to a new commit). The job opens and squash-merges a PR into `main`.
+2. **Pin update via pull request**: Only if both OS targets pass `e2e.sh`, the `pin` job runs `bun playbook/watch.ts --apply "$RUNNER_TEMP/candidate.json"`, which updates `playbook/upstream.json` and bumps the `version` field in `.playbook` (for example, `8.761.0+pb.1` to `8.762.0+pb.1`, or `8.761.0+pb.2` if the same upstream tag moved to a new commit). The job opens a PR into `main`, starts `ci` on it, and squash-merges it automatically once the required checks pass.
 3. **Local update with `cpb`**: On the user machine, running `cpb update` pulls the new playbook commit and triggers the migration hook declared in `.playbook`:
 
 ```toml

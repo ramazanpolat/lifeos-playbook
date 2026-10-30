@@ -67,6 +67,7 @@ jobs:
     needs: [detect, e2e]
     runs-on: ubuntu-latest
     permissions:
+      actions: write
       contents: write
       pull-requests: write
     steps:
@@ -96,4 +97,7 @@ jobs:
           gh pr create --base main --head "$branch" \
             --title "Pin upstream LifeOS $v" \
             --body "Upstream LifeOS $v (commit $c) converted cleanly in the e2e suite on Linux and macOS (fresh install, rerun, upgrade from the previous pin). Playbook version: $pv. Installs update with \`cpb update <playbook>\`."
-          gh pr merge "$branch" --squash --delete-branch
+          # A PR opened with GITHUB_TOKEN triggers no pull_request workflow, so start ci on the
+          # branch explicitly; main's ruleset requires its checks, and auto-merge waits for them.
+          gh workflow run ci.yml --ref "$branch"
+          gh pr merge "$branch" --squash --delete-branch --auto

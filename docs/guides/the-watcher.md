@@ -81,8 +81,8 @@ Playbook version numbering (`nextPlaybookVersion`):
 3. **`pin` (`ubuntu-latest`, `needs: [detect, e2e]`)**:
    - Runs only after both the Linux and macOS `e2e` matrix jobs pass, with `contents: write` and `pull-requests: write` permissions.
    - Applies the candidate with `bun playbook/watch.ts --apply "$RUNNER_TEMP/candidate.json"` and verifies exit code `11`.
-   - Creates branch `claude/upstream-<version>-<commit12>`, commits `playbook/upstream.json` and `.playbook`, pushes the branch, opens a pull request against `main` via `gh pr create`, and squash-merges it via `gh pr merge "$branch" --squash --delete-branch`.
+   - Creates branch `claude/upstream-<version>-<commit12>`, commits `playbook/upstream.json` and `.playbook`, pushes the branch, opens a pull request against `main` via `gh pr create`, starts `ci` on the branch (`gh workflow run ci.yml --ref "$branch"`), and turns on auto-merge (`gh pr merge "$branch" --squash --delete-branch --auto`), so the pin lands only after the same required checks as any other PR pass.
 
 ## Required GitHub Repository Setting
 
-The `pin` job uses `GITHUB_TOKEN` (`GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}`) to run `gh pr create` and `gh pr merge`. For this step to succeed, the repository must have **Allow GitHub Actions to create and approve pull requests** enabled under **Settings -> Actions -> General -> Workflow permissions**.
+The `pin` job uses `GITHUB_TOKEN` (`GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}`, with `actions`, `contents` and `pull-requests` write) to run `gh pr create`, `gh workflow run` and `gh pr merge`. A pull request opened with `GITHUB_TOKEN` triggers no `pull_request` workflow, which is why the job starts `ci` itself. For this step to succeed, the repository needs **Allow GitHub Actions to create and approve pull requests** (**Settings -> Actions -> General -> Workflow permissions**) and **Allow auto-merge** (**Settings -> General**). If `ci` fails on the pin branch, the pull request stays open for a person to look at.
