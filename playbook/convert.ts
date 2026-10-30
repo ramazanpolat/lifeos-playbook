@@ -38,6 +38,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { auditInside, diffSnapshots, hookProblems, snapshot, writeTarget } from "./lib/audit";
 import { coreServices, forceEnv, isBootstrap, pickComponents, playbookSection, preserveKeys, rebaseDefaultRoot, rebaseSettings, stripSection, upsertSection } from "./lib/patch";
+import { acquireLock } from "./lib/lock";
 import { compareVersions, fetchCommit, readPin, stamp, verifyLocalSource } from "./lib/pin";
 import { run } from "./lib/sh";
 
@@ -216,48 +217,15 @@ function upstreamEnv(root: string, userData: string, tmp: string): Record<string
 /** Exclusive lock: created atomically, released only by its owner, a dead owner's lock taken over. */
 function lock(stateDir: string): () => void {
   const f = join(stateDir, "convert.lock");
-  const mine = String(process.pid);
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      writeFileSync(f, mine, { flag: "wx" });
-      return () => {
-        try {
-          if (readFileSync(f, "utf8").trim() === mine) rmSync(f, { force: true });
-        } catch {}
-      };
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-    }
-    let pid: number;
-    try {
-      pid = Number(readFileSync(f, "utf8").trim());
-    } catch {
-      continue; // released between the two calls: try again
-    }
-    let alive = false;
-    try {
-      process.kill(pid, 0);
-      alive = true;
-    } catch {}
-    if (alive)
-      throw new Refusal(`another conversion holds the lock (pid ${pid}). Wait for it to finish, then run the command again. To see what pid ${pid} is: ps -p ${pid} -o pid=,command= . Only if it is not a conversion, remove ${f}`);
-    // Take the dead owner's lock out of the way by renaming it: only one process can move a
-    // given file, so a second one that read the same dead pid cannot delete a fresh lock.
-    const aside = `${f}.stale-${mine}`;
-    try {
-      renameSync(f, aside);
-    } catch {
-      continue;
-    }
-    if (Number(readFileSync(aside, "utf8").trim()) !== pid) {
-      // Moved a lock taken in between by a live process: put it back and stop.
-      renameSync(aside, f);
-      break;
-    }
-    rmSync(aside, { force: true });
-    log(`an earlier conversion (pid ${pid}) was interrupted; taking over its lock and continuing`);
+  const got = acquireLock(f);
+  if ("release" in got) {
+    if (got.tookOverFrom) log(`an earlier conversion (pid ${got.tookOverFrom}) was interrupted; took over its lock and continuing`);
+    return got.release;
   }
-  throw new Refusal("another conversion started at the same moment and holds the lock. Wait for it to finish, then run the command again");
+  if (got.busy)
+    throw new Refusal(`another conversion holds the lock (pid ${got.busy}). Wait for it to finish, then run the command again. To see what pid ${got.busy} is: ps -p ${got.busy} -o pid=,command= . Only if it is not a conversion, remove ${f}`);
+  const busy = "another conversion started at the same moment and holds the lock. Wait for it to finish, then run the command again";
+  throw new Refusal(got.takeover ? `${busy}. If no conversion is running, remove ${got.takeover} and ${f}, then run again: ${RETRY}` : busy);
 }
 
 interface InstallStep {
@@ -652,7 +620,10 @@ function main(): number {
     const rebuild = sessionStartCommands(readJson(settingsPath)).find((c) => /MergeSettings/.test(c));
     if (rebuild) {
       const r = run("sh", ["-c", rebuild], { cwd: root, env, capture: true, allowFail: true });
-      if (r.code !== 0) log(`settings rebuild failed (${(r.stderr || r.stdout).trim().split("\n").pop() || `exit ${r.code}`}); the first session runs it again`);
+      if (r.code !== 0) {
+        const said = (r.stderr.trim() || r.stdout.trim()).split("\n").pop() || `exit ${r.code}`;
+        throw new Error(`LifeOS ${pin.version} is installed, but upstream's settings rebuild failed (${said}), so settings.json still holds the previous merge and every session start will fail the same way. Check ${join(USER_DATA, "USER", "CONFIG", "settings.user.json")} (the user layer it merges), then run again: ${RETRY}`);
+      }
       writeJson(snapshotPath, readJson(settingsPath));
     }
 

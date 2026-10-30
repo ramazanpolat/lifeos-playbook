@@ -17,6 +17,7 @@ import {
 } from "../lib/patch";
 import { compareVersions, validatePin } from "../lib/pin";
 import { diffSnapshots, hookProblems, writeTarget } from "../lib/audit";
+import { acquireLock } from "../lib/lock";
 import { mkdtempSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -256,6 +257,39 @@ describe("writeTarget", () => {
     symlinkSync(join(dir, "outside"), join(dir, "root", "linked"));
     symlinkSync("linked/x.json", join(dir, "root", "chain.json"));
     expect(writeTarget(join(dir, "root", "chain.json"))).toBe(join(dir, "outside", "x.json"));
+  });
+  test("resolves a link whose target's parents do not exist yet (mkdir -p would create them there)", () => {
+    symlinkSync(join(dir, "root", "linked", "new", "lifeos"), join(dir, "root", "user-data"));
+    expect(writeTarget(join(dir, "root", "user-data"))).toBe(join(dir, "outside", "new", "lifeos"));
+    expect(writeTarget(join(dir, "root", "user-data", "USER", "x.json"))).toBe(join(dir, "outside", "new", "lifeos", "USER", "x.json"));
+  });
+});
+
+describe("acquireLock", () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "lk-")));
+  const f = join(dir, "convert.lock");
+  const DEAD = 2 ** 22 + 12345; // above any default pid_max
+  test("takes a free lock and releases only its own", () => {
+    const got = acquireLock(f);
+    expect("release" in got).toBe(true);
+    if ("release" in got) got.release();
+    expect(acquireLock(f, 101)).toHaveProperty("release");
+  });
+  test("refuses while a live process holds it", () => {
+    writeFileSync(f, String(process.pid));
+    expect(acquireLock(f, 102)).toEqual({ busy: process.pid });
+  });
+  test("takes over a dead owner's lock once, under the takeover lock", () => {
+    writeFileSync(f, String(DEAD));
+    const got = acquireLock(f);
+    expect(got).toHaveProperty("tookOverFrom", DEAD);
+    expect(acquireLock(f, DEAD + 1)).toEqual({ busy: process.pid }); // the new owner is live: never taken over
+    if ("release" in got) got.release();
+  });
+  test("refuses while another takeover is in progress", () => {
+    writeFileSync(f, String(DEAD));
+    writeFileSync(`${f}.takeover`, "105");
+    expect(acquireLock(f, 106)).toEqual({ busy: null, takeover: `${f}.takeover` });
   });
 });
 

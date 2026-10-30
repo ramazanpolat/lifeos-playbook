@@ -143,30 +143,29 @@ function samePath(a: unknown, b: string): boolean {
 }
 
 /**
- * Where a write to `p` lands: the parent's real path, then every symlink at the end followed,
- * dangling ones included (existsSync and realpathSync both miss a dangling link, and a write
- * creates its target).
+ * Where a write to `p` lands, symlinks resolved, also when the path does not exist yet: the
+ * deepest existing ancestor is resolved, a link met on the way is followed (dangling ones
+ * included; existsSync and realpathSync both miss those), and the missing rest is appended.
+ * `mkdir -p` and a write create exactly that path.
  */
-export function writeTarget(p: string): string {
+export function writeTarget(p: string, depth = 0): string {
+  if (depth > 40) throw new Error(`${p}: too many levels of symbolic links`);
+  const rest: string[] = [];
   let cur = resolve(p);
-  for (let i = 0; i < 40; i++) {
-    let dir: string;
+  for (;;) {
     try {
-      dir = realpathSync(dirname(cur));
-    } catch {
-      return cur;
-    }
-    const at = join(dir, basename(cur));
+      return join(realpathSync(cur), ...rest);
+    } catch {}
     let link = false;
     try {
-      link = lstatSync(at).isSymbolicLink();
-    } catch {
-      return at;
-    }
-    if (!link) return at;
-    cur = resolve(dir, readlinkSync(at));
+      link = lstatSync(cur).isSymbolicLink();
+    } catch {}
+    if (link) return join(writeTarget(resolve(dirname(cur), readlinkSync(cur)), depth + 1), ...rest);
+    const parent = dirname(cur);
+    if (parent === cur) return join(cur, ...rest);
+    rest.unshift(basename(cur));
+    cur = parent;
   }
-  throw new Error(`${p}: too many levels of symbolic links`);
 }
 
 /** Commands registered under one settings.json hook event. */
