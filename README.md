@@ -29,8 +29,8 @@ lifeos                                                       # start it, then ty
 Every PR runs `ci`: a leak scan, unit tests, the e2e suite on Linux and macOS, and the cpb
 round trip. `playbook/upstream.json` pins one upstream release by commit. A daily GitHub Action
 (`upstream-watch`) checks for a newer release, converts it in a sandbox with the e2e suite on
-Linux and macOS, and pins it only when both pass. `cpb update lifeos` then converts the new pin
-in place.
+Linux and macOS, and only when both pass opens a PR that pins it, for the owner to merge.
+`cpb update lifeos` then converts the new pin in place.
 
 What the conversion does, and leaves out:
 

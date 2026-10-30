@@ -9,6 +9,7 @@
  *                                                 # upstream's installer);
  *                                                 # keeps the candidate file, does not pin
  *   bun playbook/watch.ts --apply <file>          # make a candidate the pin; bump .playbook version
+ *                                                 # (exit 11; 0 when it already is the pin; refuses an older one)
  *
  * Pinning needs the e2e suite green on Linux AND macOS for that exact candidate: the
  * upstream-watch workflow runs --apply only after both matrix jobs pass. A local --bump
@@ -66,9 +67,17 @@ function e2e(candidate: string): boolean {
   return run("bash", [join(here, "tests/e2e.sh"), "--pin", candidate, "--from-pin", pinFile], { allowFail: true }).code === 0;
 }
 
-function apply(candidate: string): string {
+function apply(candidate: string): string | null {
   // Validate both files before writing either, so a failure never leaves them disagreeing.
   const next = readPin(candidate);
+  // main may have moved while the candidate was tested (or the file is stale): never go back.
+  const pinned = readPin(pinFile);
+  if (pinned.version === next.version && pinned.commit === next.commit) {
+    say(`${next.version}@${next.commit.slice(0, 12)} is already the pin; nothing to apply`);
+    return null;
+  }
+  if (compareVersions(next.version, pinned.version) < 0)
+    throw new Error(`candidate ${next.version} is older than the pin ${pinned.version}; refusing to go back`);
   const text = readFileSync(manifest, "utf8");
   const cur = text.match(/^version\s*=\s*"(.*)"$/m)?.[1] ?? "";
   const version = nextPlaybookVersion(cur, next.version);
@@ -97,10 +106,7 @@ async function main(): Promise<number> {
   };
 
   const applyFile = opt("--apply");
-  if (applyFile) {
-    apply(applyFile);
-    return 11;
-  }
+  if (applyFile) return apply(applyFile) === null ? 0 : 11;
 
   const latest = await detect();
   if (!latest) return 0;
@@ -110,7 +116,7 @@ async function main(): Promise<number> {
     say(`candidate written to ${out}; pin unchanged`);
   }
   if (!args.includes("--bump")) {
-    say("next: the upstream-watch workflow tests it on Linux and macOS and pins it; locally, --bump tests it on this OS");
+    say("next: the upstream-watch workflow tests it on Linux and macOS and opens a PR that pins it; locally, --bump tests it on this OS");
     return 10;
   }
 

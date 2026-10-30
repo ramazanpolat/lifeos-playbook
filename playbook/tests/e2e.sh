@@ -184,11 +184,25 @@ elif [ -n "$FROM_PIN" ]; then
   if convert "$UP" "$SANDBOX/upgrade-from.log"; then
     check "upgrade: $FV converts" true
     echo "e2e marker" > "$UP/user-data/USER/e2e-marker.txt"
+    bun -e "const f='$UP/settings.json', fs=require('fs'), s=JSON.parse(fs.readFileSync(f,'utf8')); s.env.E2E_USER_SETTING='kept'; fs.writeFileSync(f, JSON.stringify(s,null,2)+'\n')"
+    session_rebuild "$UP"
     cp "$PIN" "$UP/playbook/upstream.json"
     if convert "$UP" "$SANDBOX/upgrade-to.log"; then check "upgrade: convert to $V exits 0" true; else check "upgrade: convert to $V exits 0" false; fi
     check "upgrade: ran in upgrade mode" test "$(json "$UP/.lifeos-playbook/state.json" j.mode)" = upgrade
     check "upgrade: user data survived" test -f "$UP/user-data/USER/e2e-marker.txt"
     assert_converted "$UP" "$V" "upgrade"
+    # The same checks as a fresh install: an upgraded tree can break what a fresh one does not.
+    hcode=0
+    bun "$UP/playbook/tests/hook-smoke.ts" --root "$UP" >"$SANDBOX/hooks-upgrade.log" 2>&1 || hcode=$?
+    grep -vE '^  ok ' "$SANDBOX/hooks-upgrade.log" | sed 's/^/        /'
+    check "upgrade: every command hook exits 0 and the expected ones are registered" test "$hcode" = 0
+    session_rebuild "$UP"
+    check "upgrade: the settings edit survives the first rebuild" test "$(json "$UP/settings.json" 'j.env.E2E_USER_SETTING')" = kept
+    check "upgrade: LifeOS reads its own config" bash -c "[[ '$(resolve_user_dir "$UP")' == '$UP'/* ]]"
+    ucode=0
+    bun "$UP/playbook/convert.ts" --check >"$SANDBOX/check-upgrade.log" 2>&1 || ucode=$?
+    [ "$ucode" = 0 ] || sed 's/^/        /' "$SANDBOX/check-upgrade.log" | grep -v '✅' | head -20
+    check "upgrade: check healthy" test "$ucode" = 0
   else
     check "upgrade: $FV converts" false
   fi

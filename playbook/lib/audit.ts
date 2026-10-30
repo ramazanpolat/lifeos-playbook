@@ -29,10 +29,54 @@ export function watchedPaths(home: string): string[] {
     // The default profile is live (other sessions write it), so only LifeOS-owned entries.
     h(".claude/LIFEOS"),
     h(".claude/skills/LifeOS"),
+    h(".claude/settings.system.json"),
   ];
 }
 
-type Entry = { exists: false } | { exists: true; kind: string; mtime: number; size: number; names?: string[] };
+/** A directory's tree: relative path -> "kind mtime size". Rewrites in place count, not only new names. */
+type Tree = Record<string, string>;
+type Entry = { exists: false } | { exists: true; kind: string; mtime: number; size: number; tree?: Tree };
+
+const TREE_LIMIT = 100_000;
+
+function stamp(p: string): string | null {
+  try {
+    const st = lstatSync(p);
+    const kind = st.isSymbolicLink() ? "link" : st.isDirectory() ? "dir" : "file";
+    return `${kind} ${kind === "dir" ? 0 : st.mtimeMs} ${kind === "dir" ? 0 : st.size}`;
+  } catch {
+    return null;
+  }
+}
+
+// Not descended into: MEMORY is written by any running session of a LifeOS that lives there,
+// and package trees are large and only ever replaced whole.
+const UNWATCHED = new Set(["MEMORY", "node_modules", ".git"]);
+
+function tree(dir: string, only?: (name: string) => boolean): Tree {
+  const t: Tree = {};
+  let n = 0;
+  const walk = (d: string, rel: string, top: boolean) => {
+    let names: string[];
+    try {
+      names = readdirSync(d);
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      if (top && only && !only(name)) continue;
+      if (++n > TREE_LIMIT) return;
+      const p = join(d, name);
+      const r = rel ? `${rel}/${name}` : name;
+      const s = stamp(p);
+      if (!s) continue;
+      t[r] = s;
+      if (s.startsWith("dir ") && !UNWATCHED.has(name)) walk(p, r, false);
+    }
+  };
+  walk(dir, "", true);
+  return t;
+}
 
 function entry(p: string): Entry {
   let st;
@@ -43,12 +87,8 @@ function entry(p: string): Entry {
   }
   const kind = st.isSymbolicLink() ? "link" : st.isDirectory() ? "dir" : "file";
   const e: Entry = { exists: true, kind, mtime: st.mtimeMs, size: st.size };
-  if (kind === "dir") {
-    let names = readdirSync(p).sort();
-    // LaunchAgents and systemd hold other software's jobs: only LifeOS-named entries count.
-    if (/LaunchAgents$|systemd\/user$/.test(p)) names = names.filter((n) => /lifeos|pai\./i.test(n));
-    e.names = names;
-  }
+  // LaunchAgents and systemd hold other software's jobs: only LifeOS-named entries count.
+  if (kind === "dir") e.tree = tree(p, /LaunchAgents$|systemd\/user$/.test(p) ? (n) => /lifeos|pai\./i.test(n) : undefined);
   return e;
 }
 
@@ -73,10 +113,15 @@ export function diffSnapshots(before: Snapshot, after: Snapshot): string[] {
     if (!a.exists || !b.exists) continue;
     if (a.kind !== b.kind) out.push(`${p}: ${a.kind} -> ${b.kind}`);
     else if (a.kind === "dir") {
-      const added = (b.names ?? []).filter((n) => !(a.names ?? []).includes(n));
-      const removed = (a.names ?? []).filter((n) => !(b.names ?? []).includes(n));
-      if (added.length) out.push(`${p}: added ${added.join(", ")}`);
-      if (removed.length) out.push(`${p}: removed ${removed.join(", ")}`);
+      const ta = a.tree ?? {};
+      const tb = b.tree ?? {};
+      const list = (xs: string[]) => (xs.length > 5 ? `${xs.slice(0, 5).join(", ")} and ${xs.length - 5} more` : xs.join(", "));
+      const added = Object.keys(tb).filter((n) => !(n in ta));
+      const removed = Object.keys(ta).filter((n) => !(n in tb));
+      const changed = Object.keys(tb).filter((n) => n in ta && ta[n] !== tb[n]);
+      if (added.length) out.push(`${p}: added ${list(added)}`);
+      if (removed.length) out.push(`${p}: removed ${list(removed)}`);
+      if (changed.length) out.push(`${p}: modified ${list(changed)}`);
     } else if (a.mtime !== b.mtime || a.size !== b.size) out.push(`${p}: modified`);
   }
   return out;
@@ -140,8 +185,9 @@ export function hookProblems(settings: Record<string, any>): string[] {
 /** Problems inside the root after conversion: leftover default-root paths, links that escape. */
 export function auditInside(root: string, home: string, userData: string): string[] {
   const problems: string[] = [];
-  for (const f of ["settings.json", "settings.system.json"]) {
-    const p = join(root, f);
+  const userLayer = join(userData, "USER", "CONFIG", "settings.user.json");
+  for (const f of ["settings.json", "settings.system.json", userLayer]) {
+    const p = f.startsWith("/") ? f : join(root, f);
     if (!existsSync(p)) continue;
     const doc = JSON.parse(readFileSync(p, "utf8")) as Record<string, unknown>;
     const left = findDefaultRoot(JSON.stringify(withoutExempt(doc)), home);
@@ -156,16 +202,17 @@ export function auditInside(root: string, home: string, userData: string): strin
   const configPath = join(userData, "USER", "CONFIG", "LIFEOS_CONFIG.toml");
   if (!samePath(settings.env?.LIFEOS_CONFIG_PATH, configPath) && settings.env?.LIFEOS_CONFIG_PATH !== configPath) problems.push(`settings.json: env.LIFEOS_CONFIG_PATH is ${settings.env?.LIFEOS_CONFIG_PATH}, expected ${configPath} (else LifeOS reads ~/.claude's config)`);
   else if (!existsSync(configPath)) problems.push(`${configPath}: missing (LIFEOS_CONFIG_PATH points at it)`);
+  // Script paths in commands. Upstream leaves shell-safe characters such as + , = : % ~ unquoted
+  // in the root (InstallEngine shellQuoteRoot), so they belong to the path.
+  const scripts = (cmd: string) => cmd.match(/(?<![\w.@%+,=~:\/-])(?:\/[\w.@%+,=~:-]+)+\.(?:ts|sh|js)\b/g) ?? [];
   for (const [event, groups] of Object.entries((settings.hooks ?? {}) as Record<string, any[]>)) {
     for (const g of groups ?? []) {
       for (const h of g?.hooks ?? []) {
-        const cmd = String(h?.command ?? "");
-        for (const m of cmd.match(/(?:\/[\w.@-]+)+\.(?:ts|sh|js)\b/g) ?? []) {
-          if (!under(m, root)) problems.push(`settings.json hooks.${event}: ${m} is outside the root`);
-        }
+        for (const m of scripts(String(h?.command ?? ""))) if (!under(m, root)) problems.push(`settings.json hooks.${event}: ${m} is outside the root`);
       }
     }
   }
+  for (const m of scripts(String(settings.statusLine?.command ?? ""))) if (!under(m, root)) problems.push(`settings.json statusLine: ${m} is outside the root`);
   problems.push(...hookProblems(settings));
   // LinkUser's contract: LIFEOS/USER is the data home's USER, and LIFEOS/MEMORY is USER/MEMORY there.
   for (const [link, want] of [["LIFEOS/USER", join(userData, "USER")], ["LIFEOS/MEMORY", join(userData, "USER", "MEMORY")]] as const) {

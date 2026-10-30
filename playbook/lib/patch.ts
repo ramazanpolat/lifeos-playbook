@@ -17,24 +17,43 @@ function escapeRe(s: string): string {
  * `.claude-playbooks`, `.claude.json`, `.claudeX` and `/backup/<home>/.claude` never match.
  */
 export function defaultRootPattern(home: string): RegExp {
-  const prefixes = ["\\$\\{HOME\\}", "\\$HOME", "~", escapeRe(home.replace(/\/+$/, ""))];
-  // Left boundary: a home path inside another path (/backup/home/user/.claude) is not the default root.
-  return new RegExp(`(?<![\\w./~$])(?:${prefixes.join("|")})/\\.claude(?=[/"'\`\\s)\\]}>,:;]|\\.(?!\\w)|$)`, "g");
+  return homePathPattern(home, "\\.claude");
 }
 
-/** Rewrite every default-root spelling to the playbook root. */
-export function rebaseDefaultRoot(text: string, home: string, root: string): { text: string; count: number } {
+/**
+ * Upstream's default data home (LIFEOS_CONFIG_DIR = ~/.config/LIFEOS), in the same spellings.
+ * Its settings carry deny and ask rules for files there (the USER repo's git hooks and config,
+ * settings.user.json): in a playbook the data home is <root>/user-data, so they must follow it.
+ */
+export function defaultDataPattern(home: string): RegExp {
+  return homePathPattern(home, "\\.config/LIFEOS");
+}
+
+function homePathPattern(home: string, tail: string): RegExp {
+  const prefixes = ["\\$\\{HOME\\}", "\\$HOME", "~", escapeRe(home.replace(/\/+$/, ""))];
+  // Left boundary: a home path inside another path (/backup/home/user/.claude) is not the default.
+  return new RegExp(`(?<![\\w./~$])(?:${prefixes.join("|")})/${tail}(?=[/"'\`\\s)\\]}>,:;]|\\.(?!\\w)|$)`, "g");
+}
+
+/** Rewrite every default-root spelling to the playbook root, and the default data home to `userData` when given. */
+export function rebaseDefaultRoot(text: string, home: string, root: string, userData?: string): { text: string; count: number } {
   let count = 0;
-  const out = text.replace(defaultRootPattern(home), () => {
+  let out = text;
+  if (userData)
+    out = out.replace(defaultDataPattern(home), () => {
+      count++;
+      return userData;
+    });
+  out = out.replace(defaultRootPattern(home), () => {
     count++;
     return root;
   });
   return { text: out, count };
 }
 
-/** Default-root spellings still present (for the audit). */
+/** Default-root and default-data-home spellings still present (for the audit). */
 export function findDefaultRoot(text: string, home: string): string[] {
-  return text.match(defaultRootPattern(home)) ?? [];
+  return [...(text.match(defaultRootPattern(home)) ?? []), ...(text.match(defaultDataPattern(home)) ?? [])];
 }
 
 /** Force env keys in a settings object. Returns the keys whose value changed. */
@@ -145,8 +164,8 @@ export function withoutExempt(settings: Record<string, unknown>): Record<string,
 }
 
 /** Rebase a settings document, leaving the exempt keys exactly as they were. */
-export function rebaseSettings(settings: Record<string, unknown>, home: string, root: string): { settings: Record<string, unknown>; count: number } {
-  const { text, count } = rebaseDefaultRoot(JSON.stringify(withoutExempt(settings)), home, root);
+export function rebaseSettings(settings: Record<string, unknown>, home: string, root: string, userData?: string): { settings: Record<string, unknown>; count: number } {
+  const { text, count } = rebaseDefaultRoot(JSON.stringify(withoutExempt(settings)), home, root, userData);
   const out = JSON.parse(text) as Record<string, unknown>;
   for (const k of REBASE_EXEMPT_KEYS) if (k in settings) out[k] = settings[k];
   return { settings: out, count };

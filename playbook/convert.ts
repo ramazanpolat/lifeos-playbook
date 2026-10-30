@@ -21,9 +21,11 @@
  *   3. place the skill with the release's own install.sh (no alias edits, no launch)
  *   4. run the release's InstallAll.ts with the config root set to the playbook, every
  *      core service declined, and only components that stay inside the root
- *   5. rebase the default-profile paths upstream leaves in settings files
- *   6. append the playbook section to CLAUDE.md
- *   7. audit: nothing inside points at ~/.claude, nothing outside the root changed
+ *   5. rebase the default-profile (~/.claude) and default data-home (~/.config/LIFEOS) paths
+ *      upstream leaves in settings files and the USER tree
+ *   6. append the playbook section to CLAUDE.md, then run the per-session settings rebuild once
+ *   7. audit: nothing inside points at ~/.claude, hooks registered, USER and MEMORY mounted on
+ *      the data home, nothing outside the root changed. Every write is confined to the root.
  *
  * --check runs upstream's Doctor with this playbook's settings env (a bare Doctor run from a
  * shell lacks it and misreports the USER links), plus the pin, the audit and the USER resolution.
@@ -31,7 +33,7 @@
  * Exit: 0 converted and clean (with --plan: ready; with --check: healthy), 1 failed (with --check: not converted), 2 refused (preflight; with --plan:
  *       not ready, the missing prerequisite is named), 3 converted but the audit found problems.
  */
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { auditInside, diffSnapshots, hookProblems, snapshot, writeTarget } from "./lib/audit";
@@ -159,6 +161,11 @@ function readJson(p: string): Record<string, any> {
   return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : {};
 }
 
+/** Commands registered on SessionStart. */
+function sessionStartCommands(settings: Record<string, any>): string[] {
+  return ((settings.hooks?.SessionStart ?? []) as any[]).flatMap((g) => ((g?.hooks ?? []) as any[]).map((h) => String(h?.command ?? ""))).filter(Boolean);
+}
+
 /** Set once preflight has passed: every file the converter writes must land inside it. */
 let confineTo: string | null = null;
 
@@ -191,10 +198,12 @@ function rootEnvFor(root: string, userData: string): Record<string, string> {
 }
 
 /** Environment for every upstream process: config root, data home and temp dir inside the root. */
+// Each of these outranks or redirects the config root (TOOLS/Paths.ts, OverlaySystem, InstallHooks).
+const REDIRECTING_ENV = ["CLAUDE_PLUGIN_ROOT", "LIFEOS_HARNESS", "LIFEOS_TAG", "LIFEOS_TARBALL_URL", "LIFEOS_EXPECTED_SHA256", "DRY_RUN"];
+
 function upstreamEnv(root: string, userData: string, tmp: string): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = { ...process.env };
-  // Each of these outranks or redirects the config root (TOOLS/Paths.ts, OverlaySystem, InstallHooks).
-  for (const k of ["CLAUDE_PLUGIN_ROOT", "LIFEOS_HARNESS", "LIFEOS_TAG", "LIFEOS_TARBALL_URL", "LIFEOS_EXPECTED_SHA256", "DRY_RUN"]) delete env[k];
+  for (const k of REDIRECTING_ENV) delete env[k];
   Object.assign(env, rootEnvFor(root, userData));
   env.CLAUDE_CONFIG_DIR = root;
   env.LIFEOS_SKILLS_DIR = join(root, "skills");
@@ -295,7 +304,7 @@ function installAll(args: string[], root: string, env: Record<string, string | u
  * CUSTOMIZATIONS/SKILLS/LifeOS/Config.md on upgrade. Rebase every text file except MEMORY/,
  * which holds the user's own history.
  */
-function rebaseUserTree(userTree: string, home: string, root: string, skip: string[] = []): string[] {
+function rebaseUserTree(userTree: string, home: string, root: string, userData: string, skip: string[] = []): string[] {
   const changed: string[] = [];
   const walk = (dir: string) => {
     for (const name of readdirSync(dir)) {
@@ -310,7 +319,7 @@ function rebaseUserTree(userTree: string, home: string, root: string, skip: stri
       if (!st.isFile() || st.size > 1024 * 1024) continue;
       const buf = readFileSync(p);
       if (buf.includes(0)) continue;
-      const { text, count } = rebaseDefaultRoot(buf.toString("utf8"), home, root);
+      const { text, count } = rebaseDefaultRoot(buf.toString("utf8"), home, root, userData);
       if (count) {
         writeText(p, text);
         changed.push(p.slice(userTree.length + 1));
@@ -351,7 +360,7 @@ function pruneSkillBackups(root: string): void {
 }
 
 /** --check: report on a converted install without changing it. */
-function check(root: string, home: string): number {
+function check(root: string, home: string, pinFile: string): number {
   const say = (m: string) => console.log(`[check] ${m}`);
   const userData = join(root, USER_DATA);
   const state = readJson(join(root, STATE_DIR, "state.json"));
@@ -361,7 +370,7 @@ function check(root: string, home: string): number {
   }
   say(`LifeOS ${state.version} in ${root} (last conversion ${state.converted}, ${state.mode})`);
   let trouble = 0;
-  const pin = readPin(join(root, "playbook", "upstream.json"));
+  const pin = readPin(pinFile);
   if (pin.version !== state.version || pin.commit !== state.commit) {
     say(`pin says ${pin.version} @ ${pin.commit.slice(0, 12)}, but ${state.version} is installed: run bun ${join(root, "playbook/convert.ts")}`);
     trouble++;
@@ -373,12 +382,20 @@ function check(root: string, home: string): number {
     trouble++;
   } else say("isolation: ok (settings, config path, USER and MEMORY links all inside the playbook)");
   const settings = readJson(join(root, "settings.json"));
-  const env = { ...process.env, ...(settings.env ?? {}), CLAUDE_CONFIG_DIR: root };
+  const env: Record<string, string | undefined> = { ...process.env, ...(settings.env ?? {}), CLAUDE_CONFIG_DIR: root };
+  for (const k of REDIRECTING_ENV) delete env[k];
   const resolved = run("bun", ["-e", `const { lifeosUserDir } = await import(${JSON.stringify(join(root, "LIFEOS/TOOLS/LifeosConfig.ts"))}); console.log(lifeosUserDir())`], { cwd: root, env, capture: true, allowFail: true }).stdout.trim();
   if (resolved && existsSync(resolved) && realpathSync(resolved).startsWith(realpathSync(root) + "/")) say(`LifeOS reads its USER tree from ${resolved}`);
   else {
     say(`LifeOS resolves its USER tree to ${resolved || "(nothing)"}, outside the playbook: run the converter again`);
     trouble++;
+  }
+  if (problems.length) {
+    // Doctor creates LIFEOS/MEMORY/STATE as it probes: with a mount missing, that would be a real
+    // directory in the system tree instead of the data home.
+    say("upstream Doctor: skipped until the converter repairs the problems above");
+    say(trouble ? "needs attention: see above" : "healthy");
+    return trouble ? 3 : 0;
   }
   const doctor = run("bun", [join(root, "LIFEOS/TOOLS/Doctor.ts")], { cwd: root, env, capture: true, allowFail: true });
   const lines = (doctor.stdout + doctor.stderr).split("\n");
@@ -386,9 +403,15 @@ function check(root: string, home: string): number {
   const live = lines.filter((l) => l.includes("✅")).length;
   say(`upstream Doctor, with this playbook's settings: ${live} live, ${broken.length} broken`);
   for (const b of broken) say(`  ${b}`);
+  // Doctor's structural checks are the install's own health, not an optional tool.
+  const structural = broken.filter((b) => /USER-data mounts|hook interpreter|orphaned memory/i.test(b));
+  if (structural.length) {
+    say("  the structural item(s) above mean the install itself is damaged: run the converter again");
+    trouble++;
+  }
   const identity = broken.some((b) => /identity placeholders/i.test(b));
   if (identity) say("  (identity placeholders stay unrendered until you run /LifeOS setup in a session)");
-  if (broken.length > (identity ? 1 : 0)) say("  (missing optional tools only disable the features Doctor names)");
+  if (broken.length > structural.length + (identity ? 1 : 0)) say("  (missing optional tools only disable the features Doctor names)");
   say(trouble ? "needs attention: see above" : "healthy");
   return trouble ? 3 : 0;
 }
@@ -399,7 +422,7 @@ function main(): number {
   const root = o.root;
   if (o.check) {
     if (!existsSync(join(root, ".playbook"))) throw new Refusal(`${root} has no .playbook: not a playbook root`);
-    return check(root, home);
+    return check(root, home, o.pin);
   }
   preflight(root, home);
   RETRY = retryCommand(o);
@@ -468,6 +491,21 @@ function main(): number {
     mkdirSync(userData, { recursive: true });
     rmSync(tmp, { recursive: true, force: true });
     mkdirSync(tmp, { recursive: true });
+    const settingsPath = join(root, "settings.json");
+    const env = upstreamEnv(root, userData, tmp);
+    const snapshotPath = join(root, "LIFEOS", "MEMORY", "STATE", "settings-merge-snapshot.json");
+    if (installed && existsSync(snapshotPath)) {
+      // Fold hand edits made since the last merge into the user layer before anything rewrites
+      // settings.json -- the same backport upstream's SessionStart hook runs. First, so that a
+      // refusal really leaves the install as it was.
+      const b = run("bun", [join(root, "LIFEOS/TOOLS/SettingsBackport.ts")], { cwd: root, env, capture: true, allowFail: true });
+      const lastLine = (t: string) => t.trim().split("\n").pop() ?? "";
+      // On failure the reason is on stderr; stdout only says how many changes were written.
+      const said = (b.code !== 0 ? lastLine(b.stderr) || lastLine(b.stdout) : lastLine(b.stdout) || lastLine(b.stderr)) || `exit ${b.code}`;
+      if (b.code !== 0 && !o.skipBackport)
+        throw new Error(`could not carry your settings.json edits into the user layer before upgrading (SettingsBackport: ${said}). Nothing has been changed. Keep a copy of ${settingsPath}, fix the error, then run again: ${RETRY}\n  to upgrade anyway, accepting that edits not yet in the user layer may be lost: ${RETRY} --skip-settings-backport`);
+      log(`settings edits carried into the user layer before the upgrade (${said})`);
+    }
     const claudeMd = join(root, "CLAUDE.md");
     let claudeBefore: string | null = null;
     if (existsSync(claudeMd) && isBootstrap(readFileSync(claudeMd, "utf8"))) {
@@ -480,23 +518,11 @@ function main(): number {
       if (typeof last === "string" && last !== sha256(text)) claudeBefore = stripSection(text);
     }
     const rootEnv = rootEnvFor(root, userData);
-    const settingsPath = join(root, "settings.json");
     const settings = readJson(settingsPath);
     forceEnv(settings, rootEnv);
     writeJson(settingsPath, settings);
     if (!existsSync(join(root, ".git"))) run("git", ["init", "-q", root], { capture: true });
 
-    const env = upstreamEnv(root, userData, tmp);
-    const snapshotPath = join(root, "LIFEOS", "MEMORY", "STATE", "settings-merge-snapshot.json");
-    if (installed && existsSync(snapshotPath)) {
-      // Fold hand edits made since the last merge into the user layer before anything rewrites
-      // settings.json -- the same backport upstream's SessionStart hook runs.
-      const b = run("bun", [join(root, "LIFEOS/TOOLS/SettingsBackport.ts")], { cwd: root, env, capture: true, allowFail: true });
-      const said = (b.stdout || b.stderr).trim().split("\n").pop() || `exit ${b.code}`;
-      if (b.code !== 0 && !o.skipBackport)
-        throw new Error(`could not carry your settings.json edits into the user layer before upgrading (SettingsBackport: ${said}). Nothing has been changed. Keep a copy of ${settingsPath}, fix the error, then run again: ${RETRY}\n  to upgrade anyway, accepting that edits not yet in the user layer may be lost: ${RETRY} --skip-settings-backport`);
-      log(`settings edits carried into the user layer before the upgrade (${said})`);
-    }
 
     // 3. Place the skill with the release's own installer.
     log("placing the LifeOS skill (the release's install.sh)");
@@ -567,7 +593,7 @@ function main(): number {
     // and the first rebuild after an upgrade drops them.
     const systemLayer = join(root, "settings.system.json");
     if (!existsSync(systemLayer)) {
-      copyFileSync(join(skillRoot, "install/settings.system.json"), systemLayer);
+      writeText(systemLayer, readFileSync(join(skillRoot, "install/settings.system.json"), "utf8"));
       log("settings.system.json: established, so the per-session settings rebuild and backport work from the first session");
     }
 
@@ -575,19 +601,19 @@ function main(): number {
     for (const f of ["settings.json", "settings.system.json"]) {
       const p = join(root, f);
       if (!existsSync(p)) continue;
-      const { settings: obj, count } = rebaseSettings(readJson(p), home, root);
+      const { settings: obj, count } = rebaseSettings(readJson(p), home, root, userData);
       forceEnv(obj, rootEnv);
       writeJson(p, obj);
       if (count) log(`${f}: rebased ${count} default-profile path(s)`);
     }
     const userLayer = join(root, USER_LAYER);
-    const userFiles = rebaseUserTree(join(userData, "USER"), home, root, [userLayer]);
+    const userFiles = rebaseUserTree(join(userData, "USER"), home, root, userData, [userLayer]);
     if (userFiles.length) log(`USER tree: rebased default-profile paths in ${userFiles.length} file(s) (listed in .lifeos-playbook/state.json)`);
     // MergeSettings rebuilds settings.json from settings.system.json + the user layer each
     // session and keeps nothing else, so the keys cpb writes must live in the user layer too.
     if (existsSync(dirname(userLayer))) {
       const p = userLayer;
-      const rebased = rebaseSettings(readJson(p), home, root);
+      const rebased = rebaseSettings(readJson(p), home, root, userData);
       const layer = rebased.settings;
       let changed = forceEnv(layer, rootEnv).length > 0 || rebased.count > 0;
       const live = readJson(settingsPath);
@@ -619,6 +645,16 @@ function main(): number {
     // backport skips and the first rebuild after an upgrade drops those edits.
     mkdirSync(dirname(snapshotPath), { recursive: true });
     writeJson(snapshotPath, readJson(settingsPath));
+    // Then the rebuild every session starts with, so settings.json already holds this release's
+    // system layer merged with the user layer (not the previous release's merge until the first
+    // session). The snapshot above makes its backport a no-op: the converter's own changes are
+    // not hand edits.
+    const rebuild = sessionStartCommands(readJson(settingsPath)).find((c) => /MergeSettings/.test(c));
+    if (rebuild) {
+      const r = run("sh", ["-c", rebuild], { cwd: root, env, capture: true, allowFail: true });
+      if (r.code !== 0) log(`settings rebuild failed (${(r.stderr || r.stdout).trim().split("\n").pop() || `exit ${r.code}`}); the first session runs it again`);
+      writeJson(snapshotPath, readJson(settingsPath));
+    }
 
     // 7. Audit.
     const inside = auditInside(root, home, userData);

@@ -163,16 +163,38 @@ describe("diffSnapshots", () => {
     const before = {
       "/h/a": { exists: false as const },
       "/h/b": { exists: true as const, kind: "file", mtime: 1, size: 1 },
-      "/h/LaunchAgents": { exists: true as const, kind: "dir", mtime: 1, size: 1, names: [] },
+      "/h/LaunchAgents": { exists: true as const, kind: "dir", mtime: 1, size: 1, tree: {} },
       "/h/c": { exists: true as const, kind: "file", mtime: 1, size: 1 },
     };
     const after = {
       "/h/a": { exists: true as const, kind: "file", mtime: 2, size: 1 },
       "/h/b": { exists: true as const, kind: "file", mtime: 2, size: 1 },
-      "/h/LaunchAgents": { exists: true as const, kind: "dir", mtime: 2, size: 1, names: ["com.lifeos.pulse.plist"] },
+      "/h/LaunchAgents": { exists: true as const, kind: "dir", mtime: 2, size: 1, tree: { "com.lifeos.pulse.plist": "file 2 10" } },
       "/h/c": { exists: true as const, kind: "file", mtime: 1, size: 1 },
     };
     expect(diffSnapshots(before, after)).toEqual(["/h/a: created", "/h/b: modified", "/h/LaunchAgents: added com.lifeos.pulse.plist"]);
+  });
+
+  test("reports a file rewritten in place deep inside a watched directory", () => {
+    const dir = (tree: Record<string, string>) => ({ exists: true as const, kind: "dir", mtime: 1, size: 1, tree });
+    const before = { "/h/.claude/LIFEOS": dir({ TOOLS: "dir 0 0", "TOOLS/x.ts": "file 1 5" }) };
+    const after = { "/h/.claude/LIFEOS": dir({ TOOLS: "dir 0 0", "TOOLS/x.ts": "file 2 7" }) };
+    expect(diffSnapshots(before, after)).toEqual(["/h/.claude/LIFEOS: modified TOOLS/x.ts"]);
+  });
+});
+
+describe("default data home", () => {
+  test("its permission rules follow the data home into the playbook", () => {
+    const src = `"Edit(~/.config/LIFEOS/USER/.git/hooks/**)" "$HOME/.config/LIFEOS" "${HOME}/.config/LIFEOS/USER" "~/.claude/x"`;
+    const { text, count } = rebaseDefaultRoot(src, HOME, ROOT, `${ROOT}/user-data`);
+    expect(count).toBe(4);
+    expect(text).toBe(`"Edit(${ROOT}/user-data/USER/.git/hooks/**)" "${ROOT}/user-data" "${ROOT}/user-data/USER" "${ROOT}/x"`);
+    expect(findDefaultRoot(text, HOME)).toEqual([]);
+  });
+  test("is reported while still spelled the default way, and left alone without a data home", () => {
+    expect(findDefaultRoot("Edit(~/.config/LIFEOS/USER/CONFIG/settings.user.json)", HOME)).toHaveLength(1);
+    expect(rebaseDefaultRoot("~/.config/LIFEOS", HOME, ROOT).count).toBe(0);
+    expect(rebaseDefaultRoot("/x/.config/LIFEOS ~/.config/LIFEOSX", HOME, ROOT, "/d").count).toBe(0);
   });
 });
 
