@@ -4,7 +4,7 @@
  *
  *   bun playbook/convert.ts            # convert (fresh install, or upgrade in place)
  *   bun playbook/convert.ts --plan     # print what would happen, change nothing
- *   bun playbook/convert.ts --check    # is the converted install healthy? (changes nothing)
+ *   bun playbook/convert.ts --check    # is the converted install healthy? (only Doctor's own status files change)
  *
  * Flags: --root <dir>        playbook root (default: the playbook this script lives in)
  *        --pin <file>        pin file (default: playbook/upstream.json)
@@ -34,7 +34,7 @@
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { auditInside, diffSnapshots, snapshot } from "./lib/audit";
+import { auditInside, diffSnapshots, hookProblems, snapshot, writeTarget } from "./lib/audit";
 import { coreServices, forceEnv, isBootstrap, pickComponents, playbookSection, preserveKeys, rebaseDefaultRoot, rebaseSettings, stripSection, upsertSection } from "./lib/patch";
 import { compareVersions, fetchCommit, readPin, stamp, verifyLocalSource } from "./lib/pin";
 import { run } from "./lib/sh";
@@ -43,6 +43,7 @@ import { run } from "./lib/sh";
 const WANTED_COMPONENTS = ["tooltips", "spinnerverbs", "agents", "commands", "workflows"];
 const USER_DATA = "user-data";
 const STATE_DIR = ".lifeos-playbook";
+const USER_LAYER = `${USER_DATA}/USER/CONFIG/settings.user.json`;
 const SKILL_BACKUPS_KEPT = 2;
 /** settings.json keys cpb writes: claudeMdExcludes keeps ~/.claude's CLAUDE.md out; model and agent from SET. */
 const CPB_KEYS = ["claudeMdExcludes", "model", "agent"];
@@ -119,12 +120,11 @@ function preflight(root: string, home: string): void {
   // Every path the conversion writes must stay inside the root, symlinks resolved: a
   // settings.json linked to ~/.claude/settings.json would be written through.
   const realRoot = realpathSync(root);
-  for (const rel of ["settings.json", "settings.system.json", "CLAUDE.md", USER_DATA, STATE_DIR, "LIFEOS", "skills", "hooks", "agents", "commands", "workflows", ".git", ".gitignore"]) {
-    const p = join(root, rel);
-    if (!existsSync(p)) continue;
-    const real = realpathSync(p);
+  for (const rel of ["settings.json", "settings.system.json", "CLAUDE.md", USER_DATA, STATE_DIR, "LIFEOS", "skills", "hooks", "agents", "commands", "workflows", ".git", ".gitignore", `${USER_DATA}/USER`, `${USER_DATA}/USER/CONFIG`, USER_LAYER]) {
+    const real = writeTarget(join(root, rel));
     if (real !== realRoot && !real.startsWith(realRoot + "/")) throw new Refusal(`${rel} is a link to ${real}, outside the playbook; converting would write through it. Keep a copy of that target, replace ${join(root, rel)} with a real file or directory, then check again with --plan`);
   }
+  confineTo = realRoot;
   const v = run("bun", ["--version"], { capture: true }).stdout.trim();
   const [maj, min] = v.split(".").map(Number);
   if (maj < BUN_MIN[0] || (maj === BUN_MIN[0] && min < BUN_MIN[1])) throw new Refusal(`bun ${v} is too old; LifeOS needs ${BUN_MIN.join(".")} or newer. Run: bun upgrade`);
@@ -159,8 +159,21 @@ function readJson(p: string): Record<string, any> {
   return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : {};
 }
 
+/** Set once preflight has passed: every file the converter writes must land inside it. */
+let confineTo: string | null = null;
+
+function writeText(p: string, text: string): void {
+  if (confineTo) {
+    // Checked per write, not only in preflight: upstream's installer runs in between and the
+    // USER tree is the user's own, so a link can appear anywhere below the root.
+    const t = writeTarget(p);
+    if (t !== confineTo && !t.startsWith(confineTo + "/")) throw new Error(`${p} leads to ${t}, outside the playbook, so it was not written. Replace that link with a real file, then run again: ${RETRY}`);
+  }
+  writeFileSync(p, text);
+}
+
 function writeJson(p: string, v: unknown): void {
-  writeFileSync(p, JSON.stringify(v, null, 2) + "\n");
+  writeText(p, JSON.stringify(v, null, 2) + "\n");
 }
 
 /**
@@ -206,7 +219,12 @@ function lock(stateDir: string): () => void {
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
     }
-    const pid = Number(readFileSync(f, "utf8").trim());
+    let pid: number;
+    try {
+      pid = Number(readFileSync(f, "utf8").trim());
+    } catch {
+      continue; // released between the two calls: try again
+    }
     let alive = false;
     try {
       process.kill(pid, 0);
@@ -214,8 +232,21 @@ function lock(stateDir: string): () => void {
     } catch {}
     if (alive)
       throw new Refusal(`another conversion holds the lock (pid ${pid}). Wait for it to finish, then run the command again. To see what pid ${pid} is: ps -p ${pid} -o pid=,command= . Only if it is not a conversion, remove ${f}`);
+    // Take the dead owner's lock out of the way by renaming it: only one process can move a
+    // given file, so a second one that read the same dead pid cannot delete a fresh lock.
+    const aside = `${f}.stale-${mine}`;
+    try {
+      renameSync(f, aside);
+    } catch {
+      continue;
+    }
+    if (Number(readFileSync(aside, "utf8").trim()) !== pid) {
+      // Moved a lock taken in between by a live process: put it back and stop.
+      renameSync(aside, f);
+      break;
+    }
+    rmSync(aside, { force: true });
     log(`an earlier conversion (pid ${pid}) was interrupted; taking over its lock and continuing`);
-    rmSync(f, { force: true });
   }
   throw new Refusal("another conversion started at the same moment and holds the lock. Wait for it to finish, then run the command again");
 }
@@ -281,7 +312,7 @@ function rebaseUserTree(userTree: string, home: string, root: string, skip: stri
       if (buf.includes(0)) continue;
       const { text, count } = rebaseDefaultRoot(buf.toString("utf8"), home, root);
       if (count) {
-        writeFileSync(p, text);
+        writeText(p, text);
         changed.push(p.slice(userTree.length + 1));
       }
     }
@@ -523,6 +554,12 @@ function main(): number {
         writeJson(settingsPath, after);
       }
     }
+    // Upstream's upgrade chain re-merges hooks only where some are already wired. A fresh
+    // install interrupted between LinkUser and InstallHooks reruns as an upgrade with none.
+    if (installed !== null && hookProblems(readJson(settingsPath)).length) {
+      log("hooks: not registered (an earlier conversion stopped before upstream's InstallHooks); registering them now");
+      run("bun", [join(skillRoot, "Tools/InstallHooks.ts"), "--config-root", root, "--skill-root", skillRoot, "--apply"], { cwd: root, env, capture: true });
+    }
 
     // 5. Establish the system settings layer on a fresh install too. Upstream creates it only on
     // upgrade, and until then its SessionStart backport throws (it reads settings.system.json
@@ -543,7 +580,7 @@ function main(): number {
       writeJson(p, obj);
       if (count) log(`${f}: rebased ${count} default-profile path(s)`);
     }
-    const userLayer = join(userData, "USER", "CONFIG", "settings.user.json");
+    const userLayer = join(root, USER_LAYER);
     const userFiles = rebaseUserTree(join(userData, "USER"), home, root, [userLayer]);
     if (userFiles.length) log(`USER tree: rebased default-profile paths in ${userFiles.length} file(s) (listed in .lifeos-playbook/state.json)`);
     // MergeSettings rebuilds settings.json from settings.system.json + the user layer each
@@ -555,7 +592,8 @@ function main(): number {
       let changed = forceEnv(layer, rootEnv).length > 0 || rebased.count > 0;
       const live = readJson(settingsPath);
       const system = readJson(systemLayer);
-      const kept = preserveKeys(live, system, layer, CPB_KEYS);
+      // The snapshot still holds the previous run's merge; it is rewritten below.
+      const kept = preserveKeys(live, system, layer, CPB_KEYS, existsSync(snapshotPath) ? readJson(snapshotPath) : undefined);
       if (kept.length) {
         changed = true;
         log(`user settings layer: kept cpb key(s) ${kept.join(", ")} across the per-session rebuild`);
@@ -570,7 +608,7 @@ function main(): number {
     if (existsSync(claudeMd)) {
       const current = readFileSync(claudeMd, "utf8");
       claudeReplaced = claudeBefore !== null && claudeBefore !== stripSection(current);
-      writeFileSync(claudeMd, upsertSection(current, playbookSection({ root, userData, version: pin.version, commit: pin.commit })));
+      writeText(claudeMd, upsertSection(current, playbookSection({ root, userData, version: pin.version, commit: pin.commit })));
       if (claudeReplaced)
         log(`your edits to CLAUDE.md were replaced by upstream's template; your version is saved at ${newestBackup(root, "CLAUDE.md") ?? ".lifeos-overlay-backups/"}. Move personal instructions to CLAUDE.local.md, which updates never touch`);
     }
@@ -613,10 +651,14 @@ function main(): number {
     else log("next: restart any open sessions of this playbook so they load the new settings and hooks");
     return 0;
   } finally {
-    unlock();
-    rmSync(tmp, { recursive: true, force: true });
-    if (ok && !o.src && !o.keepStaging) rmSync(join(stateDir, "staging"), { recursive: true, force: true });
-    else if (!ok && !o.src && existsSync(staging)) log(`fetched source kept at ${staging}; the next run reuses or replaces it`);
+    // The lock goes last: the next conversion may start the moment it is released.
+    try {
+      rmSync(tmp, { recursive: true, force: true });
+      if (ok && !o.src && !o.keepStaging) rmSync(join(stateDir, "staging"), { recursive: true, force: true });
+      else if (!ok && !o.src && existsSync(staging)) log(`fetched source kept at ${staging}; the next run reuses or replaces it`);
+    } finally {
+      unlock();
+    }
   }
 }
 

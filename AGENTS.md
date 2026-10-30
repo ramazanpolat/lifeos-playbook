@@ -63,7 +63,7 @@ bun test
 - `--allow-downgrade`: allow converting a pin version lower than `LIFEOS/VERSION`
 - `--keep-staging`: keep `.lifeos-playbook/staging/<commit>` after a successful run
 - `--plan`: run preflight, print the plan without modifying files, and check conversion prerequisites (prints `ready` and exits `0`, or prints `not ready: ...` and exits `2`)
-- `--check`: report on a converted install (pin, isolation audit, USER resolution, upstream Doctor with the playbook's env); changes nothing
+- `--check`: report on a converted install (pin, isolation audit, USER resolution, upstream Doctor with the playbook's env); changes nothing of yours, though Doctor refreshes its own capability files inside the playbook
 - `--skip-settings-backport`: upgrade even if carrying `settings.json` edits into the user layer fails
 - `--migrate-from <v>` / `--migrate-to <v>`: passed by `playbook/bin/migrate` during `cpb update`
 

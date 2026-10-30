@@ -112,14 +112,18 @@ export function pickComponents(wanted: readonly string[], offered: readonly stri
 /**
  * Copy `keys` from the live settings into the user layer when their value differs from the
  * system layer's (the user layer wins the merge, key by key). A value equal to the system
- * default is left out so a later default change still reaches the install. Returns the keys copied.
+ * default is left out so a later default change still reaches the install. When the live value
+ * still equals the last merge snapshot, nothing changed it since the rebuild, so a value the
+ * user layer already holds is the newer edit and is kept. Returns the keys copied.
  */
-export function preserveKeys(live: Record<string, unknown>, system: Record<string, unknown>, layer: Record<string, unknown>, keys: readonly string[]): string[] {
+export function preserveKeys(live: Record<string, unknown>, system: Record<string, unknown>, layer: Record<string, unknown>, keys: readonly string[], snapshot?: Record<string, unknown>): string[] {
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
   const copied: string[] = [];
   for (const k of keys) {
     if (!(k in live)) continue;
-    if (k in system && JSON.stringify(system[k]) === JSON.stringify(live[k])) continue;
-    if (JSON.stringify(layer[k]) === JSON.stringify(live[k])) continue;
+    if (k in system && same(system[k], live[k])) continue;
+    if (same(layer[k], live[k])) continue;
+    if (snapshot && k in layer && k in snapshot && same(snapshot[k], live[k])) continue;
     layer[k] = live[k];
     copied.push(k);
   }

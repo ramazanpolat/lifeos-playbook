@@ -16,7 +16,10 @@ import {
   upsertSection,
 } from "../lib/patch";
 import { compareVersions, validatePin } from "../lib/pin";
-import { diffSnapshots } from "../lib/audit";
+import { diffSnapshots, hookProblems, writeTarget } from "../lib/audit";
+import { mkdtempSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const HOME = "/home/user";
 const ROOT = "/home/user/.claude-playbooks/lifeos";
@@ -198,6 +201,47 @@ describe("preserveKeys", () => {
     expect(layer).toEqual({ claudeMdExcludes: ["/home/user/.claude/**"], model: "opus" });
     expect(preserveKeys(live, system, layer, ["claudeMdExcludes", "model", "agent"])).toEqual([]);
   });
+
+  test("keeps a user-layer edit made since the last rebuild", () => {
+    const snapshot = { model: "opus" };
+    const live = { model: "opus" };
+    const layer: Record<string, unknown> = { model: "sonnet" };
+    expect(preserveKeys(live, {}, layer, ["model"], snapshot)).toEqual([]);
+    expect(layer.model).toBe("sonnet");
+  });
+
+  test("still copies a live edit made since the last rebuild", () => {
+    const layer: Record<string, unknown> = { model: "sonnet" };
+    expect(preserveKeys({ model: "haiku" }, {}, layer, ["model"], { model: "opus" })).toEqual(["model"]);
+    expect(layer.model).toBe("haiku");
+  });
+});
+
+describe("writeTarget", () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "wt-")));
+  mkdirSync(join(dir, "root"));
+  mkdirSync(join(dir, "outside"));
+  test("a plain path and a missing file stay where they are", () => {
+    writeFileSync(join(dir, "root", "a.json"), "{}");
+    expect(writeTarget(join(dir, "root", "a.json"))).toBe(join(dir, "root", "a.json"));
+    expect(writeTarget(join(dir, "root", "new.json"))).toBe(join(dir, "root", "new.json"));
+  });
+  test("follows a dangling link to where the write would create the file", () => {
+    symlinkSync(join(dir, "outside", "settings.json"), join(dir, "root", "settings.json"));
+    expect(writeTarget(join(dir, "root", "settings.json"))).toBe(join(dir, "outside", "settings.json"));
+  });
+  test("follows a link chain and a linked parent", () => {
+    symlinkSync(join(dir, "outside"), join(dir, "root", "linked"));
+    symlinkSync("linked/x.json", join(dir, "root", "chain.json"));
+    expect(writeTarget(join(dir, "root", "chain.json"))).toBe(join(dir, "outside", "x.json"));
+  });
+});
+
+describe("hookProblems", () => {
+  const cmd = (c: string) => [{ hooks: [{ type: "command", command: c }] }];
+  test("no hooks at all", () => expect(hookProblems({})).toEqual(["settings.json registers no hooks"]));
+  test("hooks but no settings rebuild", () => expect(hookProblems({ hooks: { SessionStart: cmd("bun /r/hooks/Banner.ts") } })).toHaveLength(1));
+  test("healthy", () => expect(hookProblems({ hooks: { SessionStart: cmd("bun /r/LIFEOS/TOOLS/SettingsBackport.ts; bun /r/LIFEOS/TOOLS/MergeSettings.ts") } })).toEqual([]));
 });
 
 describe("rebaseSettings", () => {

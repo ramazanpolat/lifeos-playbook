@@ -1,5 +1,5 @@
-import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { findDefaultRoot, withoutExempt } from "./patch";
 
 /**
@@ -97,6 +97,46 @@ function samePath(a: unknown, b: string): boolean {
   return typeof a === "string" && existsSync(a) && existsSync(b) && realpathSync(a) === realpathSync(b);
 }
 
+/**
+ * Where a write to `p` lands: the parent's real path, then every symlink at the end followed,
+ * dangling ones included (existsSync and realpathSync both miss a dangling link, and a write
+ * creates its target).
+ */
+export function writeTarget(p: string): string {
+  let cur = resolve(p);
+  for (let i = 0; i < 40; i++) {
+    let dir: string;
+    try {
+      dir = realpathSync(dirname(cur));
+    } catch {
+      return cur;
+    }
+    const at = join(dir, basename(cur));
+    let link = false;
+    try {
+      link = lstatSync(at).isSymbolicLink();
+    } catch {
+      return at;
+    }
+    if (!link) return at;
+    cur = resolve(dir, readlinkSync(at));
+  }
+  throw new Error(`${p}: too many levels of symbolic links`);
+}
+
+/** Commands registered under one settings.json hook event. */
+function hookCommands(settings: Record<string, any>, event: string): string[] {
+  return ((settings.hooks?.[event] ?? []) as any[]).flatMap((g) => ((g?.hooks ?? []) as any[]).map((h) => String(h?.command ?? ""))).filter(Boolean);
+}
+
+/** LifeOS without hooks runs un-bannered and never rebuilds settings: both are required. */
+export function hookProblems(settings: Record<string, any>): string[] {
+  const all = Object.keys(settings.hooks ?? {}).flatMap((e) => hookCommands(settings, e));
+  if (!all.length) return ["settings.json registers no hooks"];
+  if (!hookCommands(settings, "SessionStart").some((c) => /MergeSettings/.test(c))) return ["settings.json: SessionStart does not run the settings rebuild (MergeSettings)"];
+  return [];
+}
+
 /** Problems inside the root after conversion: leftover default-root paths, links that escape. */
 export function auditInside(root: string, home: string, userData: string): string[] {
   const problems: string[] = [];
@@ -126,7 +166,9 @@ export function auditInside(root: string, home: string, userData: string): strin
       }
     }
   }
-  for (const link of ["LIFEOS/USER", "LIFEOS/MEMORY"]) {
+  problems.push(...hookProblems(settings));
+  // LinkUser's contract: LIFEOS/USER is the data home's USER, and LIFEOS/MEMORY is USER/MEMORY there.
+  for (const [link, want] of [["LIFEOS/USER", join(userData, "USER")], ["LIFEOS/MEMORY", join(userData, "USER", "MEMORY")]] as const) {
     const p = join(root, link);
     if (!existsSync(p)) {
       problems.push(`${link}: missing`);
@@ -134,6 +176,7 @@ export function auditInside(root: string, home: string, userData: string): strin
     }
     const real = realpathSync(p);
     if (!under(real, realpathSync(root))) problems.push(`${link}: resolves outside the root (${real})`);
+    else if (!existsSync(want) || real !== realpathSync(want)) problems.push(`${link}: resolves to ${real}, expected ${want}`);
   }
   return problems;
 }
