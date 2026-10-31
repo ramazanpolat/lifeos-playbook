@@ -350,9 +350,13 @@ describe("rebaseSettings", () => {
 });
 
 describe("bun package cache", () => {
-  const home = realpathSync(mkdtempSync(join(tmpdir(), "bc-")));
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "bc-")));
+  const home = join(base, "home");
+  mkdirSync(home);
   const uid = process.getuid!();
   const cache = bunCacheDir({}, home);
+  // Permission checks mean nothing to root.
+  const asUser = uid === 0 ? test.skip : test;
   test("resolves the way bun does", () => {
     expect(cache).toBe(join(home, ".bun", "install", "cache"));
     expect(bunCacheDir({ BUN_INSTALL: "/opt/bun" }, home)).toBe("/opt/bun/install/cache");
@@ -363,17 +367,36 @@ describe("bun package cache", () => {
     mkdirSync(join(cache, "pkg@1"), { recursive: true });
     expect(bunCacheProblem(cache, home, uid)).toBeNull();
   });
-  test("entries owned by someone else: names the topmost foreign directory to chown", () => {
-    const msg = bunCacheProblem(cache, home, uid + 1) ?? "";
-    expect(msg).toContain("1 of its entries belong to another user");
-    expect(msg).toContain(`sudo chown -R "$(id -un)" ${join(home, ".bun")}`);
+  test("entries owned by someone else in a usable cache are fine", () => {
+    expect(bunCacheProblem(cache, home, uid + 1)).toBeNull();
   });
-  test("a cache directory the user cannot write", () => {
+  asUser("an unwritable cache under the home: chown of the topmost directory that is not the user's", () => {
     chmodSync(cache, 0o555);
+    try {
+      expect(bunCacheProblem(cache, home, uid) ?? "").toContain(`Fix: chmod u+rwx ${cache}`);
+      expect(bunCacheProblem(cache, home, uid + 1) ?? "").toContain(`Fix: sudo chown -R "$(id -un)" ${join(home, ".bun")}`);
+    } finally {
+      chmodSync(cache, 0o755);
+    }
+  });
+  asUser("write without search permission is not usable", () => {
+    chmodSync(cache, 0o666);
     try {
       expect(bunCacheProblem(cache, home, uid) ?? "").toContain(`${cache} is not writable by you`);
     } finally {
       chmodSync(cache, 0o755);
+    }
+  });
+  asUser("outside the home: no chown is suggested", () => {
+    const outside = join(base, "opt");
+    mkdirSync(outside, { mode: 0o555 });
+    try {
+      const msg = bunCacheProblem(join(outside, "new-cache"), home, uid + 1) ?? "";
+      expect(msg).toContain(`${outside} is not writable by you`);
+      expect(msg).not.toContain("chown");
+      expect(msg).toContain("BUN_INSTALL_CACHE_DIR");
+    } finally {
+      chmodSync(outside, 0o755);
     }
   });
 });

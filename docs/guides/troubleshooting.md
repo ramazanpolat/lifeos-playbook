@@ -32,10 +32,10 @@ Install `make` and `g++` (for example, `sudo apt install build-essential` on Deb
 Upstream's `DeployCore` runs `bun install` in about twenty directories, and every one uses bun's package cache (`$BUN_INSTALL_CACHE_DIR`, else `$BUN_INSTALL/install/cache`, else `~/.bun/install/cache`). A cache left owned by root, usually by an earlier `sudo bun ...`, fails each of them with `error: cannot write files to cache directory ... EACCES`. `--plan` and a real conversion check for it first and name the fix, for example:
 
 ```text
-[convert] not ready: bun's package cache /home/user/.bun/install/cache cannot be used: 1081 of its entries belong to another user (usually left by an earlier sudo bun), and upstream's installer runs bun install about twenty times. Fix: sudo chown -R "$(id -un)" /home/user/.bun/install
+[convert] not ready: bun's package cache /home/user/.bun/install/cache cannot be used: /home/user/.bun/install/cache is not writable by you (often left by an earlier sudo bun), and upstream's installer runs bun install about twenty times. Fix: sudo chown -R "$(id -un)" /home/user/.bun/install
 ```
 
-Run the `chown` it names, then run `convert.ts` again. A conversion that already stopped at `DeployCore` reruns as a fresh install and reuses the fetched source.
+Run the fix it names, then run `convert.ts` again. The check is the one bun needs, write and search permission on the cache (or on the directory it would be created in); entries owned by another user inside a usable cache do not count. A `chown` is suggested only for directories under your home; for a cache elsewhere (`BUN_INSTALL_CACHE_DIR`), make it writable yourself or point `BUN_INSTALL_CACHE_DIR` at a directory you own. A conversion that already stopped at `DeployCore` reruns as a fresh install and reuses the fetched source.
 
 ## Upstream Step Timeouts (Safe to Rerun)
 
