@@ -17,8 +17,9 @@ function alive(pid: number): boolean {
  * never touched: acquiring is an atomic create, which fails while the dead owner's file stays.
  * Returns `busy` with the holder's pid (null when unknown), and `takeover` when that second lock
  * is held (by a process starting at this moment, or left by one that crashed mid-takeover).
+ * `isAlive` is replaceable for tests.
  */
-export function acquireLock(f: string, pid = process.pid): LockResult {
+export function acquireLock(f: string, pid = process.pid, isAlive: (pid: number) => boolean = alive): LockResult {
   const mine = String(pid);
   const release = () => {
     try {
@@ -45,7 +46,15 @@ export function acquireLock(f: string, pid = process.pid): LockResult {
       if (create(f)) return { release }; // released in between
     }
     if (!(owner > 0)) return { busy: null };
-    if (alive(owner)) return { busy: owner };
+    if (isAlive(owner)) return { busy: owner };
+    // The owner may have released and exited after the read, and another process taken the free
+    // lock: remove the file only if it still names the dead owner. Nothing else removes a dead
+    // owner's lock (takeovers hold the second lock), so it cannot change between here and rmSync.
+    let now = NaN;
+    try {
+      now = Number(readFileSync(f, "utf8").trim());
+    } catch {}
+    if (now !== owner) return create(f) ? { release } : { busy: null };
     rmSync(f, { force: true });
     if (!create(f)) return { busy: null };
     return { release, tookOverFrom: owner };

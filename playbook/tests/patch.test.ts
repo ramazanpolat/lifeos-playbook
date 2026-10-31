@@ -18,7 +18,7 @@ import {
 import { compareVersions, validatePin } from "../lib/pin";
 import { diffSnapshots, hookProblems, writeTarget } from "../lib/audit";
 import { acquireLock } from "../lib/lock";
-import { mkdtempSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -293,6 +293,19 @@ describe("acquireLock", () => {
     expect(acquireLock(f, DEAD + 1)).toEqual({ busy: process.pid }); // the new owner is live: never taken over
     if ("release" in got) got.release();
   });
+  test("never removes a lock taken after the dead owner was read", () => {
+    writeFileSync(f, String(DEAD));
+    // Between the read and the liveness check, the owner releases and exits, and B takes the free lock.
+    const isAlive = () => {
+      rmSync(f);
+      writeFileSync(f, "4242");
+      return false;
+    };
+    expect(acquireLock(f, 107, isAlive)).toEqual({ busy: null });
+    expect(readFileSync(f, "utf8")).toBe("4242");
+    rmSync(f);
+  });
+
   test("refuses while another takeover is in progress", () => {
     writeFileSync(f, String(DEAD));
     writeFileSync(`${f}.takeover`, "105");
