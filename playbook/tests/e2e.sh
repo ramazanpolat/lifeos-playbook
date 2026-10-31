@@ -122,9 +122,16 @@ echo "== fresh install of $V"
 ROOT="$HOME/.claude-playbooks/lifeos"
 stage_root "$ROOT" "$PIN"
 FRESH_OK=0
-if convert "$ROOT" "$SANDBOX/fresh.log"; then FRESH_OK=1; check "fresh: convert exits 0" true; else check "fresh: convert exits 0" false; fi
+# The fresh install runs with bun's shared cache unusable (as when an earlier sudo bun left it owned
+# by root), so the converter's fallback to a cache inside the playbook is exercised; the rerun below
+# uses the normal cache.
+LOCKED_CACHE="$SANDBOX/locked-bun-cache"
+mkdir -p "$LOCKED_CACHE" && chmod 555 "$LOCKED_CACHE"
+if BUN_INSTALL_CACHE_DIR="$LOCKED_CACHE" convert "$ROOT" "$SANDBOX/fresh.log"; then FRESH_OK=1; check "fresh: convert exits 0" true; else check "fresh: convert exits 0" false; fi
+chmod 755 "$LOCKED_CACHE"
 if [ "$FRESH_OK" -eq 1 ]; then
   assert_converted "$ROOT" "$V" "fresh"
+  check "fresh: an unusable bun cache falls back to one inside the playbook" bash -c "grep -q 'is not writable by you, so the conversion uses' '$SANDBOX/fresh.log' && [ -d '$ROOT/.lifeos-playbook/bun-cache' ] && [ -z \"\$(ls -A '$LOCKED_CACHE')\" ]"
 
   echo "== hooks (every registered hook fired with a synthetic Claude Code event)"
   hcode=0

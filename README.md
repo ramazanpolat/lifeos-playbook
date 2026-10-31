@@ -16,7 +16,7 @@ policy, so a new upstream release converts without porting work.
 
 Requirements: [Claude Code](https://claude.com/claude-code), [cpb](https://github.com/ramazanpolat/claude-playbooks)
 4+, bun 1.2+, git. On Linux, LifeOS's installer compiles node-pty, so it also needs `make` and a
-C++ compiler (Debian/Ubuntu: `sudo apt install build-essential`). bun's package cache must be writable by you. `--plan` tells you if any of this is missing.
+C++ compiler (Debian/Ubuntu: `sudo apt install build-essential`). `--plan` tells you if any of this is missing. If bun's package cache is not writable by you (for example, left owned by root by an earlier `sudo bun`), the conversion uses a cache inside the playbook instead.
 
 ```bash
 cpb CREATE PLAYBOOK lifeos FROM https://github.com/ramazanpolat/lifeos-playbook

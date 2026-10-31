@@ -158,10 +158,19 @@ function preflight(root: string, home: string): void {
 }
 
 /** Prerequisites the conversion needs but --plan only reports. */
-function missingPrerequisites(home: string): string[] {
+/**
+ * bun's shared package cache, when this user cannot use it (left owned by root by an earlier
+ * sudo bun): the conversion then gives upstream's installer a cache inside the playbook, so it
+ * needs no root to repair someone else's directory.
+ */
+function bunCacheFallback(home: string, stateDir: string): { shared: string; local: string; fix: string } | null {
+  const shared = bunCacheDir(process.env, home);
+  const problem = bunCacheProblem(shared, home);
+  return problem ? { shared, local: join(stateDir, "bun-cache"), fix: problem.fix } : null;
+}
+
+function missingPrerequisites(): string[] {
   const out: string[] = [];
-  const cache = bunCacheProblem(bunCacheDir(process.env, home), home, process.getuid?.() ?? -1);
-  if (cache) out.push(cache);
   // node-pty (Pulse Desktop) has no Linux prebuild: upstream's DeployCore compiles it with node-gyp.
   if (process.platform === "linux") {
     const missing = ["make", "g++"].filter((t) => run("sh", ["-c", `command -v ${t}`], { capture: true, allowFail: true }).code !== 0);
@@ -448,7 +457,9 @@ function main(): number {
   log(`user data ${userData}`);
   log(`source    ${o.src ?? `fetch github.com/${pin.repo} ${pin.commit}`}`);
   if (o.migrateFrom || o.migrateTo) log(`cpb update ${o.migrateFrom ?? "?"} -> ${o.migrateTo ?? "?"}`);
-  const missingPrereqs = missingPrerequisites(home);
+  const missingPrereqs = missingPrerequisites();
+  const cache = bunCacheFallback(home, stateDir);
+  if (cache) log(`bun's package cache ${cache.shared} is not writable by you, so the conversion uses ${cache.local} instead (more downloading, the same result). To share bun's cache again: ${cache.fix}`);
   if (o.plan) {
     log(`plan only: components ${WANTED_COMPONENTS.join(",")} (minus any the release lacks); all core services declined`);
     if (missingPrereqs.length) {
@@ -494,6 +505,7 @@ function main(): number {
     mkdirConfined(tmp);
     const settingsPath = join(root, "settings.json");
     const env = upstreamEnv(root, userData, tmp);
+    if (cache) env.BUN_INSTALL_CACHE_DIR = cache.local;
     const snapshotPath = join(root, SNAPSHOT);
     if (installed && existsSync(snapshotPath)) {
       // Fold hand edits made since the last merge into the user layer before anything rewrites

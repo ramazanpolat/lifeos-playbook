@@ -29,13 +29,15 @@ Install `make` and `g++` (for example, `sudo apt install build-essential` on Deb
 
 ## bun Package Cache Not Writable (`EACCES`)
 
-Upstream's `DeployCore` runs `bun install` in about twenty directories, and every one uses bun's package cache (`$BUN_INSTALL_CACHE_DIR`, else `$BUN_INSTALL/install/cache`, else `~/.bun/install/cache`). A cache left owned by root, usually by an earlier `sudo bun ...`, fails each of them with `error: cannot write files to cache directory ... EACCES`. `--plan` and a real conversion check for it first and name the fix, for example:
+Upstream's `DeployCore` runs `bun install` in about twenty directories, and each one uses bun's shared package cache (`$BUN_INSTALL_CACHE_DIR`, else `$BUN_INSTALL/install/cache`, else `$XDG_CACHE_HOME/.bun/install/cache`, else `~/.bun/install/cache`). A cache left owned by root, usually by an earlier `sudo bun ...`, used to fail each of them with `error: cannot write files to cache directory ... EACCES`.
+
+`convert.ts` checks the cache first (write and search permission on it, or on the directory it would be created in). When you cannot use it, the conversion gives upstream's installer a cache inside the playbook instead, so it needs no root, and says so:
 
 ```text
-[convert] not ready: bun's package cache /home/user/.bun/install/cache cannot be used: /home/user/.bun/install/cache is not writable by you (often left by an earlier sudo bun), and upstream's installer runs bun install about twenty times. Fix: sudo chown -R "$(id -un)" /home/user/.bun/install
+[convert] bun's package cache /home/user/.bun/install/cache is not writable by you, so the conversion uses /home/user/.claude-playbooks/lifeos/.lifeos-playbook/bun-cache instead (more downloading, the same result). To share bun's cache again: sudo chown -R "$(id -un)" '/home/user/.bun/install/cache'
 ```
 
-Run the fix it names, then run `convert.ts` again. The check is the one bun needs, write and search permission on the cache (or on the directory it would be created in); entries owned by another user inside a usable cache do not count. A `chown` is suggested only for directories under your home; for a cache elsewhere (`BUN_INSTALL_CACHE_DIR`), make it writable yourself or point `BUN_INSTALL_CACHE_DIR` at a directory you own. A conversion that already stopped at `DeployCore` reruns as a fresh install and reuses the fetched source.
+The suggested fix is optional. It names a `chown` only for the cache itself and only when it lies under your home (symlinks resolved); otherwise it asks you to make the directory writable or point `BUN_INSTALL_CACHE_DIR` at one you own. A `cache.dir` set in a `bunfig.toml` is not consulted.
 
 ## Upstream Step Timeouts (Safe to Rerun)
 

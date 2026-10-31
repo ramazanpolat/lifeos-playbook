@@ -18,10 +18,10 @@ import {
 import { compareVersions, validatePin } from "../lib/pin";
 import { diffSnapshots, hookProblems, writeTarget } from "../lib/audit";
 import { acquireLock } from "../lib/lock";
-import { bunCacheDir, bunCacheProblem } from "../lib/prereq";
+import { bunCacheDir, bunCacheProblem, shellQuote } from "../lib/prereq";
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 const HOME = "/home/user";
 const ROOT = "/home/user/.claude-playbooks/lifeos";
@@ -353,50 +353,58 @@ describe("bun package cache", () => {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "bc-")));
   const home = join(base, "home");
   mkdirSync(home);
-  const uid = process.getuid!();
   const cache = bunCacheDir({}, home);
   // Permission checks mean nothing to root.
-  const asUser = uid === 0 ? test.skip : test;
-  test("resolves the way bun does", () => {
-    expect(cache).toBe(join(home, ".bun", "install", "cache"));
-    expect(bunCacheDir({ BUN_INSTALL: "/opt/bun" }, home)).toBe("/opt/bun/install/cache");
-    expect(bunCacheDir({ BUN_INSTALL_CACHE_DIR: "/c", BUN_INSTALL: "/opt/bun" }, home)).toBe("/c");
-  });
-  test("fine when missing under a writable home, and when it is the user's", () => {
-    expect(bunCacheProblem(cache, home, uid)).toBeNull();
-    mkdirSync(join(cache, "pkg@1"), { recursive: true });
-    expect(bunCacheProblem(cache, home, uid)).toBeNull();
-  });
-  test("entries owned by someone else in a usable cache are fine", () => {
-    expect(bunCacheProblem(cache, home, uid + 1)).toBeNull();
-  });
-  asUser("an unwritable cache under the home: chown of the topmost directory that is not the user's", () => {
-    chmodSync(cache, 0o555);
+  const asUser = process.getuid!() === 0 ? test.skip : test;
+  const locked = (dir: string, mode: number, fn: () => void) => {
+    chmodSync(dir, mode);
     try {
-      expect(bunCacheProblem(cache, home, uid) ?? "").toContain(`Fix: chmod u+rwx ${cache}`);
-      expect(bunCacheProblem(cache, home, uid + 1) ?? "").toContain(`Fix: sudo chown -R "$(id -un)" ${join(home, ".bun")}`);
+      fn();
     } finally {
-      chmodSync(cache, 0o755);
+      chmodSync(dir, 0o755);
     }
+  };
+  test("resolves in bun's order, always absolute", () => {
+    expect(cache).toBe(join(home, ".bun", "install", "cache"));
+    expect(bunCacheDir({ XDG_CACHE_HOME: "/x" }, home)).toBe("/x/.bun/install/cache");
+    expect(bunCacheDir({ BUN_INSTALL: "/opt/bun", XDG_CACHE_HOME: "/x" }, home)).toBe("/opt/bun/install/cache");
+    expect(bunCacheDir({ BUN_INSTALL_CACHE_DIR: "/c", BUN_INSTALL: "/opt/bun" }, home)).toBe("/c");
+    expect(isAbsolute(bunCacheDir({ BUN_INSTALL_CACHE_DIR: "rel/cache" }, home))).toBe(true);
+  });
+  test("usable: missing under a writable home, the user's own, or holding someone else's entries", () => {
+    expect(bunCacheProblem(cache, home)).toBeNull();
+    mkdirSync(join(cache, "pkg@1"), { recursive: true });
+    expect(bunCacheProblem(cache, home)).toBeNull();
+  });
+  asUser("an unwritable cache under the home: chown of the cache itself, quoted", () => {
+    locked(cache, 0o555, () => expect(bunCacheProblem(cache, home)).toEqual({ blocked: cache, fix: `sudo chown -R "$(id -un)" '${cache}'` }));
   });
   asUser("write without search permission is not usable", () => {
-    chmodSync(cache, 0o666);
-    try {
-      expect(bunCacheProblem(cache, home, uid) ?? "").toContain(`${cache} is not writable by you`);
-    } finally {
-      chmodSync(cache, 0o755);
-    }
+    locked(cache, 0o666, () => expect(bunCacheProblem(cache, home)?.blocked).toBe(cache));
   });
-  asUser("outside the home: no chown is suggested", () => {
+  asUser("a missing cache under an unwritable directory: create just the cache", () => {
+    const missing = join(cache, "sub", "cache");
+    locked(cache, 0o555, () => expect(bunCacheProblem(missing, home)?.fix).toBe(`sudo mkdir -p '${missing}' && sudo chown -R "$(id -un)" '${missing}'`));
+  });
+  asUser("outside the home, also through a symlinked directory in the home: no chown", () => {
     const outside = join(base, "opt");
-    mkdirSync(outside, { mode: 0o555 });
-    try {
-      const msg = bunCacheProblem(join(outside, "new-cache"), home, uid + 1) ?? "";
-      expect(msg).toContain(`${outside} is not writable by you`);
-      expect(msg).not.toContain("chown");
-      expect(msg).toContain("BUN_INSTALL_CACHE_DIR");
-    } finally {
-      chmodSync(outside, 0o755);
-    }
+    mkdirSync(join(outside, "install", "cache"), { recursive: true });
+    symlinkSync(outside, join(home, ".linked"));
+    locked(join(outside, "install", "cache"), 0o555, () => {
+      expect(bunCacheProblem(join(outside, "install", "cache"), home)?.fix).not.toContain("chown");
+      expect(bunCacheProblem(join(home, ".linked", "install", "cache"), home)?.fix).not.toContain("chown");
+    });
+  });
+  asUser("odd names are quoted as one shell word", () => {
+    const odd = join(home, "it's a cache");
+    mkdirSync(odd);
+    locked(odd, 0o555, () => expect(bunCacheProblem(odd, home)?.fix).toBe(`sudo chown -R "$(id -un)" ${shellQuote(odd)}`));
+    expect(shellQuote("a'b c")).toBe(`'a'\\''b c'`);
+  });
+  test("a file is not a cache", () => {
+    const file = join(home, "not-a-dir");
+    writeFileSync(file, "x");
+    expect(bunCacheProblem(file, home)?.fix).toContain("a directory you can write");
+    expect(bunCacheProblem(join(file, "cache"), home)?.blocked).toBe(file);
   });
 });
