@@ -39,6 +39,7 @@ import { dirname, join, resolve } from "node:path";
 import { auditInside, diffSnapshots, hookProblems, snapshot, writeTarget } from "./lib/audit";
 import { coreServices, forceEnv, isBootstrap, pickComponents, playbookSection, preserveKeys, rebaseDefaultRoot, rebaseSettings, stripSection, upsertSection } from "./lib/patch";
 import { acquireLock } from "./lib/lock";
+import { bunCacheDir, bunCacheProblem } from "./lib/prereq";
 import { compareVersions, fetchCommit, readPin, stamp, verifyLocalSource } from "./lib/pin";
 import { run } from "./lib/sh";
 
@@ -157,8 +158,10 @@ function preflight(root: string, home: string): void {
 }
 
 /** Prerequisites the conversion needs but --plan only reports. */
-function missingPrerequisites(): string[] {
+function missingPrerequisites(home: string): string[] {
   const out: string[] = [];
+  const cache = bunCacheProblem(bunCacheDir(process.env, home), home, process.getuid?.() ?? -1);
+  if (cache) out.push(cache);
   // node-pty (Pulse Desktop) has no Linux prebuild: upstream's DeployCore compiles it with node-gyp.
   if (process.platform === "linux") {
     const missing = ["make", "g++"].filter((t) => run("sh", ["-c", `command -v ${t}`], { capture: true, allowFail: true }).code !== 0);
@@ -445,7 +448,7 @@ function main(): number {
   log(`user data ${userData}`);
   log(`source    ${o.src ?? `fetch github.com/${pin.repo} ${pin.commit}`}`);
   if (o.migrateFrom || o.migrateTo) log(`cpb update ${o.migrateFrom ?? "?"} -> ${o.migrateTo ?? "?"}`);
-  const missingPrereqs = missingPrerequisites();
+  const missingPrereqs = missingPrerequisites(home);
   if (o.plan) {
     log(`plan only: components ${WANTED_COMPONENTS.join(",")} (minus any the release lacks); all core services declined`);
     if (missingPrereqs.length) {

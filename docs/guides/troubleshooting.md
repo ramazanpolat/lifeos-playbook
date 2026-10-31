@@ -27,6 +27,16 @@ Upstream's `DeployCore` step compiles `node-pty` from source using `node-gyp` on
 
 Install `make` and `g++` (for example, `sudo apt install build-essential` on Debian/Ubuntu) and re-run `convert.ts`.
 
+## bun Package Cache Not Writable (`EACCES`)
+
+Upstream's `DeployCore` runs `bun install` in about twenty directories, and every one uses bun's package cache (`$BUN_INSTALL_CACHE_DIR`, else `$BUN_INSTALL/install/cache`, else `~/.bun/install/cache`). A cache left owned by root, usually by an earlier `sudo bun ...`, fails each of them with `error: cannot write files to cache directory ... EACCES`. `--plan` and a real conversion check for it first and name the fix, for example:
+
+```text
+[convert] not ready: bun's package cache /home/user/.bun/install/cache cannot be used: 1081 of its entries belong to another user (usually left by an earlier sudo bun), and upstream's installer runs bun install about twenty times. Fix: sudo chown -R "$(id -un)" /home/user/.bun/install
+```
+
+Run the `chown` it names, then run `convert.ts` again. A conversion that already stopped at `DeployCore` reruns as a fresh install and reuses the fetched source.
+
 ## Upstream Step Timeouts (Safe to Rerun)
 
 During `InstallAll.ts`, upstream runs `bun install` and compilation sub-steps under internal per-step timeouts (upstream represents a timeout as exit `124`). On a slow network or cold package cache, a step such as `DeployCore` can exceed its timeout (`300s`):

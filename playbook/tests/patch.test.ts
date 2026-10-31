@@ -18,7 +18,8 @@ import {
 import { compareVersions, validatePin } from "../lib/pin";
 import { diffSnapshots, hookProblems, writeTarget } from "../lib/audit";
 import { acquireLock } from "../lib/lock";
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { bunCacheDir, bunCacheProblem } from "../lib/prereq";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -345,5 +346,34 @@ describe("rebaseSettings", () => {
     expect(out.env).toEqual({ LIFEOS_DIR: `${ROOT}/LIFEOS` });
     expect(out.permissions).toEqual({ allow: [`Edit(${ROOT}/**)`] });
     expect(settings.env.LIFEOS_DIR).toBe("$HOME/.claude/LIFEOS"); // input untouched
+  });
+});
+
+describe("bun package cache", () => {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "bc-")));
+  const uid = process.getuid!();
+  const cache = bunCacheDir({}, home);
+  test("resolves the way bun does", () => {
+    expect(cache).toBe(join(home, ".bun", "install", "cache"));
+    expect(bunCacheDir({ BUN_INSTALL: "/opt/bun" }, home)).toBe("/opt/bun/install/cache");
+    expect(bunCacheDir({ BUN_INSTALL_CACHE_DIR: "/c", BUN_INSTALL: "/opt/bun" }, home)).toBe("/c");
+  });
+  test("fine when missing under a writable home, and when it is the user's", () => {
+    expect(bunCacheProblem(cache, home, uid)).toBeNull();
+    mkdirSync(join(cache, "pkg@1"), { recursive: true });
+    expect(bunCacheProblem(cache, home, uid)).toBeNull();
+  });
+  test("entries owned by someone else: names the topmost foreign directory to chown", () => {
+    const msg = bunCacheProblem(cache, home, uid + 1) ?? "";
+    expect(msg).toContain("1 of its entries belong to another user");
+    expect(msg).toContain(`sudo chown -R "$(id -un)" ${join(home, ".bun")}`);
+  });
+  test("a cache directory the user cannot write", () => {
+    chmodSync(cache, 0o555);
+    try {
+      expect(bunCacheProblem(cache, home, uid) ?? "").toContain(`${cache} is not writable by you`);
+    } finally {
+      chmodSync(cache, 0o755);
+    }
   });
 });
