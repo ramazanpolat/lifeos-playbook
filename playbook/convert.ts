@@ -134,7 +134,7 @@ function preflight(root: string, home: string): void {
   };
   // Top-level entries first: LIFEOS itself linked away would make the mount check below name a
   // path inside the other tree.
-  confined(["settings.json", "settings.system.json", "CLAUDE.md", USER_DATA, STATE_DIR, "LIFEOS", "skills", "hooks", "agents", "commands", "workflows", ".git", ".gitignore", `${USER_DATA}/USER`, `${USER_DATA}/USER/CONFIG`, `${USER_DATA}/USER/MEMORY`, USER_LAYER]);
+  confined(["settings.json", "settings.system.json", "CLAUDE.md", USER_DATA, STATE_DIR, "LIFEOS", "skills", "hooks", "agents", "commands", "workflows", ".git", ".gitignore", `${USER_DATA}/USER`, `${USER_DATA}/USER/CONFIG`, `${USER_DATA}/USER/MEMORY`, USER_LAYER, `${STATE_DIR}/bun-cache`]);
   // The USER and MEMORY mounts: a relink to ~/.config/LIFEOS (what a bare Doctor run suggests)
   // would send the pre-upgrade backport's writes there, before upstream's LinkUser runs.
   for (const [rel, want] of [["LIFEOS/USER", `${USER_DATA}/USER`], ["LIFEOS/MEMORY", `${USER_DATA}/USER/MEMORY`]]) {
@@ -505,7 +505,10 @@ function main(): number {
     mkdirConfined(tmp);
     const settingsPath = join(root, "settings.json");
     const env = upstreamEnv(root, userData, tmp);
-    if (cache) env.BUN_INSTALL_CACHE_DIR = cache.local;
+    if (cache) {
+      mkdirConfined(cache.local);
+      env.BUN_INSTALL_CACHE_DIR = cache.local;
+    }
     const snapshotPath = join(root, SNAPSHOT);
     if (installed && existsSync(snapshotPath)) {
       // Fold hand edits made since the last merge into the user layer before anything rewrites
