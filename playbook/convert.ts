@@ -124,6 +124,16 @@ function preflight(root: string, home: string): void {
   // Every path the conversion writes must stay inside the root, symlinks resolved: a
   // settings.json linked to ~/.claude/settings.json would be written through.
   const realRoot = realpathSync(root);
+  const inside = (real: string) => real === realRoot || real.startsWith(realRoot + "/");
+  const confined = (rels: string[]) => {
+    for (const rel of rels) {
+      const real = writeTarget(join(root, rel));
+      if (!inside(real)) throw new Refusal(`${rel} is a link to ${real}, outside the playbook; converting would write through it. Keep a copy of that target, replace ${join(root, rel)} with a real file or directory, then check again with --plan`);
+    }
+  };
+  // Top-level entries first: LIFEOS itself linked away would make the mount check below name a
+  // path inside the other tree.
+  confined(["settings.json", "settings.system.json", "CLAUDE.md", USER_DATA, STATE_DIR, "LIFEOS", "skills", "hooks", "agents", "commands", "workflows", ".git", ".gitignore", `${USER_DATA}/USER`, `${USER_DATA}/USER/CONFIG`, `${USER_DATA}/USER/MEMORY`, USER_LAYER]);
   // The USER and MEMORY mounts: a relink to ~/.config/LIFEOS (what a bare Doctor run suggests)
   // would send the pre-upgrade backport's writes there, before upstream's LinkUser runs.
   for (const [rel, want] of [["LIFEOS/USER", `${USER_DATA}/USER`], ["LIFEOS/MEMORY", `${USER_DATA}/USER/MEMORY`]]) {
@@ -134,13 +144,11 @@ function preflight(root: string, home: string): void {
     } catch {}
     if (!link) continue;
     const real = writeTarget(p);
-    if (real !== realRoot && !real.startsWith(realRoot + "/"))
+    if (!inside(real))
       throw new Refusal(`${rel} points at ${real}, outside the playbook (a relink that a bare Doctor run suggests does this). Point it back at the data home: ln -sfn ${join(root, want)} ${p} , then check again with --plan`);
   }
-  for (const rel of ["settings.json", "settings.system.json", "CLAUDE.md", USER_DATA, STATE_DIR, "LIFEOS", "skills", "hooks", "agents", "commands", "workflows", ".git", ".gitignore", `${USER_DATA}/USER`, `${USER_DATA}/USER/CONFIG`, `${USER_DATA}/USER/MEMORY`, USER_LAYER, SNAPSHOT]) {
-    const real = writeTarget(join(root, rel));
-    if (real !== realRoot && !real.startsWith(realRoot + "/")) throw new Refusal(`${rel} is a link to ${real}, outside the playbook; converting would write through it. Keep a copy of that target, replace ${join(root, rel)} with a real file or directory, then check again with --plan`);
-  }
+  // What the pre-upgrade backport writes, through the mounts.
+  confined([SNAPSHOT, "LIFEOS/USER/CONFIG/settings.user.json"]);
   confineTo = realRoot;
   const v = run("bun", ["--version"], { capture: true }).stdout.trim();
   const [maj, min] = v.split(".").map(Number);

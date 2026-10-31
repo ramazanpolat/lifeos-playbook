@@ -160,7 +160,17 @@ export function writeTarget(p: string, depth = 0): string {
     try {
       link = lstatSync(cur).isSymbolicLink();
     } catch {}
-    if (link) return join(writeTarget(resolve(dirname(cur), readlinkSync(cur)), depth + 1), ...rest);
+    if (link) {
+      // A relative target is relative to the directory the link really sits in, which differs
+      // from the spelled one when a parent is itself a link.
+      let base: string;
+      try {
+        base = realpathSync(dirname(cur));
+      } catch {
+        base = writeTarget(dirname(cur), depth + 1);
+      }
+      return join(writeTarget(resolve(base, readlinkSync(cur)), depth + 1), ...rest);
+    }
     const parent = dirname(cur);
     if (parent === cur) return join(cur, ...rest);
     rest.unshift(basename(cur));

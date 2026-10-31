@@ -272,6 +272,18 @@ describe("writeTarget", () => {
   });
 });
 
+describe("writeTarget, relative links under a linked parent", () => {
+  test("a relative target is resolved from the directory the link really sits in", () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "wr-")));
+    const root = join(dir, "root");
+    mkdirSync(join(root, "user-data", "USER"), { recursive: true });
+    mkdirSync(join(dir, "outside"));
+    symlinkSync("../..", join(root, "user-data", "USER", "CONFIG")); // CONFIG is the root itself
+    symlinkSync("../outside/injected.json", join(root, "settings.user.json")); // dangling, relative
+    expect(writeTarget(join(root, "user-data", "USER", "CONFIG", "settings.user.json"))).toBe(join(dir, "outside", "injected.json"));
+  });
+});
+
 describe("acquireLock", () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "lk-")));
   const f = join(dir, "convert.lock");
