@@ -1,0 +1,114 @@
+# Daily: when upstream LifeOS publishes a newer release (or moves a release tag), convert it
+# with the e2e suite on Linux and macOS and, only when both pass, open a PR that pins it.
+# The owner merges that PR (main's ruleset requires CI checks a PR opened with GITHUB_TOKEN
+# never gets); installs then pick it up with `cpb update <playbook>`.
+name: upstream-watch
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-watch
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      candidate: ${{ steps.detect.outputs.candidate }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.13"
+      - name: Unit tests
+        run: bun test
+      - name: Compare the pin with the latest release
+        id: detect
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          bun playbook/watch.ts --candidate-out candidate.json
+          code=$?
+          set -e
+          if [ "$code" -eq 10 ]; then
+            v="$(jq -r .version candidate.json)"
+            c="$(jq -r .commit candidate.json)"
+            open="$(gh pr list --head "claude/upstream-$v-${c:0:12}" --state open --json number -q '.[0].number')"
+            if [ -n "$open" ]; then
+              echo "LifeOS $v (${c:0:12}) already passed and waits in PR #$open: merge it, then cpb update"
+            else
+              echo "candidate=$(tr -d '\n' < candidate.json)" >> "$GITHUB_OUTPUT"
+            fi
+          elif [ "$code" -ne 0 ]; then
+            exit "$code"
+          fi
+
+  e2e:
+    needs: detect
+    if: needs.detect.outputs.candidate != ''
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.13"
+      - name: Convert the candidate (fresh, rerun, upgrade from the pin)
+        env:
+          CANDIDATE: ${{ needs.detect.outputs.candidate }}
+        run: |
+          printf '%s\n' "$CANDIDATE" > "$RUNNER_TEMP/candidate.json"
+          bash playbook/tests/e2e.sh --pin "$RUNNER_TEMP/candidate.json" --from-pin playbook/upstream.json
+
+  pin:
+    needs: [detect, e2e]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.13"
+      - name: Pin the tested candidate in a PR
+        env:
+          CANDIDATE: ${{ needs.detect.outputs.candidate }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$CANDIDATE" > "$RUNNER_TEMP/candidate.json"
+          set +e; bun playbook/watch.ts --apply "$RUNNER_TEMP/candidate.json"; code=$?; set -e
+          [ "$code" -eq 11 ] || exit "$code"
+          v="$(bun -e 'console.log(require("./playbook/upstream.json").version)')"
+          c="$(bun -e 'console.log(require("./playbook/upstream.json").commit)')"
+          pv="$(sed -n 's/^version = "\(.*\)"$/\1/p' .playbook)"
+          branch="claude/upstream-$v-${c:0:12}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add playbook/upstream.json .playbook
+          git commit -m "chore: pin upstream LifeOS $v (${c:0:12})"
+          # The branch is the watcher's own; one left behind without an open PR is replaced.
+          git push --force origin "$branch"
+          gh pr create --base main --head "$branch" \
+            --title "Pin upstream LifeOS $v" \
+            --body "Upstream LifeOS $v (commit $c) converted cleanly in the e2e suite on Linux and macOS (fresh install, rerun, upgrade from the previous pin): $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Playbook version: $pv.
+
+          This PR changes only playbook/upstream.json and .playbook. It cannot start CI by itself (it was opened with the workflow token), so main's required checks stay pending: merge it as a repository admin (bypass), then update installs with \`cpb update <playbook>\`."
+          # No merge here: a PR opened with GITHUB_TOKEN starts no workflow, and checks from a
+          # dispatched run do not count toward main's required checks. The owner merges it.

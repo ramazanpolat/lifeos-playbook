@@ -1,0 +1,12 @@
+#!/bin/sh
+# cpb update's migrate step: <from-version> <to-version> <install-dir>.
+# The update has already laid down the new pin; convert it in place.
+set -eu
+BUN=$(command -v bun 2>/dev/null || true)
+if [ -z "$BUN" ] && [ -x "$HOME/.bun/bin/bun" ]; then BUN="$HOME/.bun/bin/bun"; fi
+if [ -z "$BUN" ]; then
+  echo "lifeos-playbook: bun is not on PATH (nor in ~/.bun/bin), so the update cannot convert the new release." >&2
+  echo "Install bun 1.2+ (https://bun.sh), then run: bun \"$3/playbook/convert.ts\"" >&2
+  exit 1
+fi
+exec "$BUN" "$3/playbook/convert.ts" --root "$3" --migrate-from "$1" --migrate-to "$2"
