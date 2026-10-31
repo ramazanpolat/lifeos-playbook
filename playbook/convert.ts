@@ -39,6 +39,7 @@ import { dirname, join, resolve } from "node:path";
 import { auditInside, diffSnapshots, hookProblems, snapshot, writeTarget } from "./lib/audit";
 import { coreServices, forceEnv, isBootstrap, pickComponents, playbookSection, preserveKeys, rebaseDefaultRoot, rebaseSettings, stripSection, upsertSection } from "./lib/patch";
 import { acquireLock } from "./lib/lock";
+import { bunCacheDir, bunCacheProblem } from "./lib/prereq";
 import { compareVersions, fetchCommit, readPin, stamp, verifyLocalSource } from "./lib/pin";
 import { run } from "./lib/sh";
 
@@ -133,7 +134,7 @@ function preflight(root: string, home: string): void {
   };
   // Top-level entries first: LIFEOS itself linked away would make the mount check below name a
   // path inside the other tree.
-  confined(["settings.json", "settings.system.json", "CLAUDE.md", USER_DATA, STATE_DIR, "LIFEOS", "skills", "hooks", "agents", "commands", "workflows", ".git", ".gitignore", `${USER_DATA}/USER`, `${USER_DATA}/USER/CONFIG`, `${USER_DATA}/USER/MEMORY`, USER_LAYER]);
+  confined(["settings.json", "settings.system.json", "CLAUDE.md", USER_DATA, STATE_DIR, "LIFEOS", "skills", "hooks", "agents", "commands", "workflows", ".git", ".gitignore", `${USER_DATA}/USER`, `${USER_DATA}/USER/CONFIG`, `${USER_DATA}/USER/MEMORY`, USER_LAYER, `${STATE_DIR}/bun-cache`]);
   // The USER and MEMORY mounts: a relink to ~/.config/LIFEOS (what a bare Doctor run suggests)
   // would send the pre-upgrade backport's writes there, before upstream's LinkUser runs.
   for (const [rel, want] of [["LIFEOS/USER", `${USER_DATA}/USER`], ["LIFEOS/MEMORY", `${USER_DATA}/USER/MEMORY`]]) {
@@ -157,6 +158,17 @@ function preflight(root: string, home: string): void {
 }
 
 /** Prerequisites the conversion needs but --plan only reports. */
+/**
+ * bun's shared package cache, when this user cannot use it (left owned by root by an earlier
+ * sudo bun): the conversion then gives upstream's installer a cache inside the playbook, so it
+ * needs no root to repair someone else's directory.
+ */
+function bunCacheFallback(home: string, stateDir: string): { shared: string; local: string; fix: string } | null {
+  const shared = bunCacheDir(process.env, home);
+  const problem = bunCacheProblem(shared, home);
+  return problem ? { shared, local: join(stateDir, "bun-cache"), fix: problem.fix } : null;
+}
+
 function missingPrerequisites(): string[] {
   const out: string[] = [];
   // node-pty (Pulse Desktop) has no Linux prebuild: upstream's DeployCore compiles it with node-gyp.
@@ -446,6 +458,8 @@ function main(): number {
   log(`source    ${o.src ?? `fetch github.com/${pin.repo} ${pin.commit}`}`);
   if (o.migrateFrom || o.migrateTo) log(`cpb update ${o.migrateFrom ?? "?"} -> ${o.migrateTo ?? "?"}`);
   const missingPrereqs = missingPrerequisites();
+  const cache = bunCacheFallback(home, stateDir);
+  if (cache) log(`bun's package cache ${cache.shared} is not writable by you, so the conversion uses ${cache.local} instead (more downloading, the same result). To share bun's cache again: ${cache.fix}`);
   if (o.plan) {
     log(`plan only: components ${WANTED_COMPONENTS.join(",")} (minus any the release lacks); all core services declined`);
     if (missingPrereqs.length) {
@@ -491,6 +505,10 @@ function main(): number {
     mkdirConfined(tmp);
     const settingsPath = join(root, "settings.json");
     const env = upstreamEnv(root, userData, tmp);
+    if (cache) {
+      mkdirConfined(cache.local);
+      env.BUN_INSTALL_CACHE_DIR = cache.local;
+    }
     const snapshotPath = join(root, SNAPSHOT);
     if (installed && existsSync(snapshotPath)) {
       // Fold hand edits made since the last merge into the user layer before anything rewrites

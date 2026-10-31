@@ -27,6 +27,18 @@ Upstream's `DeployCore` step compiles `node-pty` from source using `node-gyp` on
 
 Install `make` and `g++` (for example, `sudo apt install build-essential` on Debian/Ubuntu) and re-run `convert.ts`.
 
+## bun Package Cache Not Writable (`EACCES`)
+
+Upstream's `DeployCore` runs `bun install` in about twenty directories, and each one uses bun's shared package cache (`$BUN_INSTALL_CACHE_DIR`, else `$BUN_INSTALL/install/cache`, else `$XDG_CACHE_HOME/.bun/install/cache`, else `~/.bun/install/cache`). A cache left owned by root, usually by an earlier `sudo bun ...`, used to fail each of them with `error: cannot write files to cache directory ... EACCES`.
+
+`convert.ts` checks the cache first (write and search permission on it, or on the directory it would be created in). When you cannot use it, the conversion gives upstream's installer a cache inside the playbook instead, so it needs no root, and says so:
+
+```text
+[convert] bun's package cache /home/user/.bun/install/cache is not writable by you, so the conversion uses /home/user/.claude-playbooks/lifeos/.lifeos-playbook/bun-cache instead (more downloading, the same result). To share bun's cache again: sudo chown -R "$(id -un)" '/home/user/.bun/install/cache'
+```
+
+The suggested fix is optional. It names a `chown` only for the cache itself and only when it lies under your home (symlinks resolved); otherwise it asks you to make the directory writable or point `BUN_INSTALL_CACHE_DIR` at one you own. A `cache.dir` set in a `bunfig.toml` is not consulted.
+
 ## Upstream Step Timeouts (Safe to Rerun)
 
 During `InstallAll.ts`, upstream runs `bun install` and compilation sub-steps under internal per-step timeouts (upstream represents a timeout as exit `124`). On a slow network or cold package cache, a step such as `DeployCore` can exceed its timeout (`300s`):
