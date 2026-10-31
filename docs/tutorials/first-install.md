@@ -36,7 +36,7 @@ Expected output (exit code `0`):
 [convert] user data /home/user/.claude-playbooks/lifeos/user-data
 [convert] source    fetch github.com/danielmiessler/LifeOS fb9aef4640a73feae4c2e6483b26f58491ce2665
 [convert] plan only: components tooltips,spinnerverbs,agents,commands,workflows (minus any the release lacks); all core services declined
-[convert] ready: run the same command without --plan to convert
+[convert] ready: local prerequisites are in place (network access and the lock are checked when it runs). Next: bun /home/user/.claude-playbooks/lifeos/playbook/convert.ts
 ```
 
 On Linux, if `make` or `g++` is missing, `--plan` prints `[convert] not ready: ...` instead of `ready` and exits `2`.
@@ -55,8 +55,8 @@ The converter performs seven steps:
 2. Pre-seeds `settings.json` with `env.LIFEOS_CONFIG_DIR` (`/home/user/.claude-playbooks/lifeos/user-data`), `env.LIFEOS_DIR` (`/home/user/.claude-playbooks/lifeos/LIFEOS`), and `env.LIFEOS_CONFIG_PATH` (`/home/user/.claude-playbooks/lifeos/user-data/USER/CONFIG/LIFEOS_CONFIG.toml`), moves the bootstrap `CLAUDE.md` to `.lifeos-playbook/bootstrap-CLAUDE.md`, and initializes `.git` if absent.
 3. Runs upstream's `install/install.sh` with shell aliases and auto-launch disabled (`LIFEOS_SKIP_ALIAS=1`, `LIFEOS_NO_LAUNCH=1`, `LIFEOS_AUTO_INSTALL_BUN=0`).
 4. Runs upstream's `Tools/InstallAll.ts` with `--config-root` set to the playbook root, all core services declined, and `--components` restricted to the allow-list (`tooltips,spinnerverbs,agents,commands,workflows`).
-5. Rebases default-profile paths (`~/.claude`, `$HOME/.claude`, `${HOME}/.claude`, `/home/user/.claude`) to the playbook root and default data-home paths (`~/.config/LIFEOS` in the same spellings) to `user-data` in `settings.json`, `settings.system.json` (when present), and eligible text files under `user-data/USER`, pins `LIFEOS_CONFIG_DIR`, `LIFEOS_DIR`, and `LIFEOS_CONFIG_PATH` across settings layers, and copies `claudeMdExcludes`, `model`, and `agent` into `user-data/USER/CONFIG/settings.user.json` when their values differ from the system layer.
-6. Appends the `<!-- lifeos-playbook:begin -->` section (which imports `@CLAUDE.local.md`) to upstream's `CLAUDE.md`, prunes older skill backups, and writes `LIFEOS/MEMORY/STATE/settings-merge-snapshot.json` so subsequent hand edits to `settings.json` are backported on session start.
+5. Rebases default-profile paths (`~/.claude`, `$HOME/.claude`, `${HOME}/.claude`, `/home/user/.claude`) to the playbook root and default data-home paths (`~/.config/LIFEOS` in the same spellings) to `user-data` in `settings.json`, `settings.system.json` (when present), and eligible text files under `user-data/USER`, pins `LIFEOS_CONFIG_DIR`, `LIFEOS_DIR`, and `LIFEOS_CONFIG_PATH` across settings layers, and copies `claudeMdExcludes`, `model`, and `agent` into `user-data/USER/CONFIG/settings.user.json` when their values differ from the system layer and changed since the last settings rebuild.
+6. Appends the `<!-- lifeos-playbook:begin -->` section (which imports `@CLAUDE.local.md`) to upstream's `CLAUDE.md`, prunes older skill backups, writes `LIFEOS/MEMORY/STATE/settings-merge-snapshot.json` so subsequent hand edits to `settings.json` are backported on session start, and runs the `SessionStart` settings rebuild once so `settings.json` already holds this release's merge.
 7. Audits the playbook root and watched paths in `/home/user`, writes `.lifeos-playbook/state.json`, and removes the staging directory.
 
 When the run finishes cleanly, it exits `0` and prints:

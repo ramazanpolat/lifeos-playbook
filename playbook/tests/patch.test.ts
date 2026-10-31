@@ -233,6 +233,13 @@ describe("preserveKeys", () => {
     expect(layer.model).toBe("sonnet");
   });
 
+  test("keeps a deletion from the user layer, and never pins an old system default", () => {
+    const layer: Record<string, unknown> = {};
+    // live and snapshot hold what the last merge produced (a user value, or the old release's default)
+    expect(preserveKeys({ model: "opus" }, { model: "sonnet" }, layer, ["model"], { model: "opus" })).toEqual([]);
+    expect(layer).toEqual({});
+  });
+
   test("still copies a live edit made since the last rebuild", () => {
     const layer: Record<string, unknown> = { model: "sonnet" };
     expect(preserveKeys({ model: "haiku" }, {}, layer, ["model"], { model: "opus" })).toEqual(["model"]);

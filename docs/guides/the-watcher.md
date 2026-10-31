@@ -50,7 +50,7 @@ Pinning requires `e2e.sh` passing on both Linux and macOS; a single-machine `--b
 bun playbook/watch.ts --apply candidate.json
 ```
 
-Reads a structurally validated candidate pin from `candidate.json`, writes it to `playbook/upstream.json`, updates the `version` line in `.playbook`, and exits `11`. `--apply` does not verify the upstream commit or test results; the caller must ensure the candidate passed testing on both Linux and macOS before applying it.
+Reads a structurally validated candidate pin from `candidate.json`, writes it to `playbook/upstream.json`, updates the `version` line in `.playbook`, and exits `11`. When the candidate already is the pin (same version and commit) it changes nothing and exits `0`; a candidate older than the pin is refused (exit `1`), so a stale candidate can never move `main` back. `--apply` does not verify the upstream commit or test results; the caller must ensure the candidate passed testing on both Linux and macOS before applying it.
 
 Playbook version numbering (`nextPlaybookVersion`):
 
@@ -61,8 +61,8 @@ Playbook version numbering (`nextPlaybookVersion`):
 
 | Exit Code | Meaning |
 |---|---|
-| `0` | Nothing to do (pin is already up to date, or upstream's latest release is older than the pin) |
-| `1` | Error (GitHub API failure, missing `<file>` argument, invalid pin JSON, missing `version` line in `.playbook`) |
+| `0` | Nothing to do (pin is already up to date, or upstream's latest release is older than the pin; with `--apply`, the candidate already is the pin) |
+| `1` | Error (GitHub API failure, missing `<file>` argument, invalid pin JSON, missing `version` line in `.playbook`, `--apply` of a candidate older than the pin) |
 | `10` | Newer release (or moved tag) found — in report mode, `--candidate-out`, or `--bump` after `e2e.sh` passed on this OS |
 | `11` | Candidate pin applied to `playbook/upstream.json` and `.playbook` (`--apply <file>`) |
 | `12` | `e2e.sh` failed during `--bump`; pin left unchanged |
@@ -74,7 +74,7 @@ Playbook version numbering (`nextPlaybookVersion`):
 1. **`detect` (`ubuntu-latest`)**:
    - Runs `bun test`.
    - Runs `bun playbook/watch.ts --candidate-out candidate.json` with `GITHUB_TOKEN`.
-   - On exit `10`, exports the single-line contents of `candidate.json` as the `candidate` job output. On exit `0`, finishes cleanly with an empty output so the remaining jobs are skipped.
+   - On exit `10`, exports the single-line contents of `candidate.json` as the `candidate` job output, unless a pin PR for that exact release (branch `claude/upstream-<version>-<commit12>`) is already open: then it logs the PR number and leaves the output empty. On exit `0`, finishes cleanly with an empty output. An empty output skips the remaining jobs.
 2. **`e2e` (`ubuntu-latest` and `macos-latest`, `if: needs.detect.outputs.candidate != ''`)**:
    - Writes the `candidate` JSON output to `$RUNNER_TEMP/candidate.json`.
    - Runs `bash playbook/tests/e2e.sh --pin "$RUNNER_TEMP/candidate.json" --from-pin playbook/upstream.json` on both Linux and macOS (`fail-fast: true`).

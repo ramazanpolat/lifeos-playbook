@@ -46,9 +46,9 @@ Upstream's `Tools/DeployComponents.ts` defines `DOCUMENTED_OPTIONAL_COMPONENTS`.
 
 If an upstream release offers none of `WANTED_COMPONENTS`, `convert.ts` aborts rather than passing an empty `--components` flag (which would cause `InstallAll.ts` to deploy its default set).
 
-### Rebased Default-Profile Paths
+### Rebased Default-Profile and Data-Home Paths
 
-Upstream templates and settings files contain hardcoded references to the default Claude Code profile. After `InstallAll.ts` completes, `convert.ts` rewrites every boundary-anchored spelling of the default root (`~/.claude`, `$HOME/.claude`, `${HOME}/.claude`, and `/home/user/.claude`) to `<root>`:
+Upstream templates and settings files contain hardcoded references to the default Claude Code profile and to the default data home. After `InstallAll.ts` completes, `convert.ts` rewrites every boundary-anchored spelling of the default root (`~/.claude`, `$HOME/.claude`, `${HOME}/.claude`, and `/home/user/.claude`) to `<root>`, and of the default data home (`~/.config/LIFEOS` in the same four spellings) to `<root>/user-data`. The second matters for permissions: upstream's settings carry deny and ask rules for files in the data home (the USER repo's `.git/hooks` and `.git/config`, Proof receipts, `settings.user.json`), and they must name the playbook's data home to protect it. The rewrite covers:
 
 - `<root>/settings.json` and `<root>/settings.system.json` (when present)
 - Every regular text file (`<= 1 MiB`, non-binary, non-symlink) under `<root>/user-data/USER`, except `user-data/USER/MEMORY/`, `.git`, `node_modules`, and `user-data/USER/CONFIG/settings.user.json` (rebased separately). For example, `pulse_templates_dir` in `user-data/USER/CUSTOMIZATIONS/SKILLS/LifeOS/Config.md` is rebased so upstream's `ScaffoldUser` follows it inside the root on subsequent upgrades.
@@ -71,8 +71,8 @@ To keep playbook isolation keys, `cpb` keys, and hand edits intact across sessio
 2. **In `user-data/USER/CONFIG/settings.user.json`**:
    - Rebases any default-profile paths (excluding `claudeMdExcludes`).
    - Forces `env.LIFEOS_CONFIG_DIR` (`<root>/user-data`), `env.LIFEOS_DIR` (`<root>/LIFEOS`), and `env.LIFEOS_CONFIG_PATH` (`<root>/user-data/USER/CONFIG/LIFEOS_CONFIG.toml`).
-   - Copies `CPB_KEYS` (`claudeMdExcludes`, `model`, `agent`) from the live `settings.json` into `settings.user.json` when their values differ from the system layer (`preserveKeys`).
-3. **After conversion**: Writes `LIFEOS/MEMORY/STATE/settings-merge-snapshot.json` equal to the converted `settings.json`, so hand edits made afterward are seen as drift and backported by `SettingsBackport` on the next session start or upgrade.
+   - Copies `CPB_KEYS` (`claudeMdExcludes`, `model`, `agent`) from the live `settings.json` into `settings.user.json` when their values differ from the system layer and changed since the last merge snapshot (`preserveKeys`); when the live value still equals the snapshot, the user layer is the newer state and is kept, including a deletion there.
+3. **After conversion**: Writes `LIFEOS/MEMORY/STATE/settings-merge-snapshot.json` equal to the converted `settings.json`, then runs the registered `SessionStart` rebuild once (its backport is then a no-op) and writes the snapshot again, so `settings.json` holds this release's merge and hand edits made afterward are seen as drift and backported on the next session start or upgrade. A failed rebuild fails the conversion.
 
 ### `CLAUDE.md` Section and `CLAUDE.local.md`
 
@@ -85,13 +85,14 @@ After `InstallAll.ts` finishes, `convert.ts` appends or replaces (`upsertSection
 Step 7 of `convert.ts` runs two checks:
 
 1. **Inside audit (`auditInside`)**:
-   - Checks `settings.json` and `settings.system.json` (excluding `claudeMdExcludes`) for any remaining `~/.claude`, `$HOME/.claude`, `${HOME}/.claude`, or `/home/user/.claude` strings.
+   - Checks `settings.json`, `settings.system.json` and `user-data/USER/CONFIG/settings.user.json` (excluding `claudeMdExcludes`) for any remaining default-root or default-data-home spellings (`~/.claude`, `~/.config/LIFEOS` and their `$HOME`, `${HOME}` and `/home/user` forms).
    - Verifies no entry in `claudeMdExcludes` points lexically under `<root>`.
    - Verifies `settings.json` has `env.LIFEOS_CONFIG_DIR === "<root>/user-data"`, `env.LIFEOS_DIR === "<root>/LIFEOS"`, and `env.LIFEOS_CONFIG_PATH === "<root>/user-data/USER/CONFIG/LIFEOS_CONFIG.toml"`, and that `<root>/user-data/USER/CONFIG/LIFEOS_CONFIG.toml` exists.
-   - Scans every hook command in `settings.json` (`hooks.<event>`) for matched absolute script-path strings (`*.ts`, `*.sh`, `*.js`) and checks that each is under `<root>` lexically; hook-script symlink targets are not resolved.
-   - Verifies `LIFEOS/USER` and `LIFEOS/MEMORY` exist and their real paths (`realpathSync`) resolve under `realpathSync(root)`.
+   - Scans every hook command and the `statusLine` command in `settings.json` for absolute script paths (`*.ts`, `*.sh`, `*.js`, allowing the shell-safe characters upstream leaves unquoted, such as `+ , = : % ~`) and checks that each is under `<root>`.
+   - Requires hooks to be registered, including the `SessionStart` settings rebuild (`MergeSettings`).
+   - Verifies `LIFEOS/USER` and `LIFEOS/MEMORY` resolve exactly to `user-data/USER` and `user-data/USER/MEMORY`.
 2. **Outside snapshot diff (`diffSnapshots`)**:
-   Observes selected outside paths (`watchedPaths`) before and after conversion rather than enforcing an OS-level filesystem boundary, detecting creation, removal, modification, or directory-entry changes in locations where upstream's installer is known to write when not isolated:
+   Observes selected outside paths (`watchedPaths`) before and after conversion, detecting creation, removal and modification. Directories are recorded recursively (path, kind, mtime, size; `MEMORY`, `node_modules` and `.git` are not descended into), so a file rewritten in place inside an existing LifeOS tree is reported. Separately, every file the converter itself writes is confined: a write whose target, symlinks resolved, lands outside `<root>` is refused. The watched locations are where upstream's installer is known to write when not isolated:
    - `~/Library/LaunchAgents` (entries matching `/lifeos|pai\./i`)
    - `~/Library/Application Support/LifeOS`
    - `~/Library/Logs/lifeos`
@@ -104,7 +105,7 @@ Step 7 of `convert.ts` runs two checks:
    - `~/.hammerspoon/init.lua`
    - `~/.hammerspoon/lifeos.lua`
    - `~/.zshrc`, `~/.bashrc`, `~/.bash_profile`, `~/.profile`, `~/.gitconfig`
-   - `~/.claude/LIFEOS`, `~/.claude/skills/LifeOS`
+   - `~/.claude/LIFEOS`, `~/.claude/skills/LifeOS`, `~/.claude/settings.system.json`
 
 All findings are recorded in the `problems` array of `<root>/.lifeos-playbook/state.json`. If `problems` is non-empty, `convert.ts` prints each problem and exits with code `3`.
 

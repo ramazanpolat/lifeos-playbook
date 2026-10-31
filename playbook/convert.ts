@@ -47,6 +47,7 @@ const WANTED_COMPONENTS = ["tooltips", "spinnerverbs", "agents", "commands", "wo
 const USER_DATA = "user-data";
 const STATE_DIR = ".lifeos-playbook";
 const USER_LAYER = `${USER_DATA}/USER/CONFIG/settings.user.json`;
+const SNAPSHOT = "LIFEOS/MEMORY/STATE/settings-merge-snapshot.json";
 const SKILL_BACKUPS_KEPT = 2;
 /** settings.json keys cpb writes: claudeMdExcludes keeps ~/.claude's CLAUDE.md out; model and agent from SET. */
 const CPB_KEYS = ["claudeMdExcludes", "model", "agent"];
@@ -123,7 +124,20 @@ function preflight(root: string, home: string): void {
   // Every path the conversion writes must stay inside the root, symlinks resolved: a
   // settings.json linked to ~/.claude/settings.json would be written through.
   const realRoot = realpathSync(root);
-  for (const rel of ["settings.json", "settings.system.json", "CLAUDE.md", USER_DATA, STATE_DIR, "LIFEOS", "skills", "hooks", "agents", "commands", "workflows", ".git", ".gitignore", `${USER_DATA}/USER`, `${USER_DATA}/USER/CONFIG`, USER_LAYER]) {
+  // The USER and MEMORY mounts: a relink to ~/.config/LIFEOS (what a bare Doctor run suggests)
+  // would send the pre-upgrade backport's writes there, before upstream's LinkUser runs.
+  for (const [rel, want] of [["LIFEOS/USER", `${USER_DATA}/USER`], ["LIFEOS/MEMORY", `${USER_DATA}/USER/MEMORY`]]) {
+    const p = join(root, rel);
+    let link = false;
+    try {
+      link = lstatSync(p).isSymbolicLink();
+    } catch {}
+    if (!link) continue;
+    const real = writeTarget(p);
+    if (real !== realRoot && !real.startsWith(realRoot + "/"))
+      throw new Refusal(`${rel} points at ${real}, outside the playbook (a relink that a bare Doctor run suggests does this). Point it back at the data home: ln -sfn ${join(root, want)} ${p} , then check again with --plan`);
+  }
+  for (const rel of ["settings.json", "settings.system.json", "CLAUDE.md", USER_DATA, STATE_DIR, "LIFEOS", "skills", "hooks", "agents", "commands", "workflows", ".git", ".gitignore", `${USER_DATA}/USER`, `${USER_DATA}/USER/CONFIG`, `${USER_DATA}/USER/MEMORY`, USER_LAYER, SNAPSHOT]) {
     const real = writeTarget(join(root, rel));
     if (real !== realRoot && !real.startsWith(realRoot + "/")) throw new Refusal(`${rel} is a link to ${real}, outside the playbook; converting would write through it. Keep a copy of that target, replace ${join(root, rel)} with a real file or directory, then check again with --plan`);
   }
@@ -178,6 +192,14 @@ function writeText(p: string, text: string): void {
     if (t !== confineTo && !t.startsWith(confineTo + "/")) throw new Error(`${p} leads to ${t}, outside the playbook, so it was not written. Replace that link with a real file, then run again: ${RETRY}`);
   }
   writeFileSync(p, text);
+}
+
+function mkdirConfined(dir: string): void {
+  if (confineTo) {
+    const t = writeTarget(dir);
+    if (t !== confineTo && !t.startsWith(confineTo + "/")) throw new Error(`${dir} leads to ${t}, outside the playbook, so it was not created. Replace that link with a real directory, then run again: ${RETRY}`);
+  }
+  mkdirSync(dir, { recursive: true });
 }
 
 function writeJson(p: string, v: unknown): void {
@@ -428,7 +450,7 @@ function main(): number {
   }
   if (missingPrereqs.length) throw new Refusal(missingPrereqs.join("; "));
 
-  mkdirSync(stateDir, { recursive: true });
+  mkdirConfined(stateDir);
   const unlock = lock(stateDir);
   const staging = o.src ?? join(stateDir, "staging", pin.commit);
   let ok = false;
@@ -456,12 +478,12 @@ function main(): number {
     if (payloadVersion !== pin.version) throw new Error(`release payload says ${payloadVersion}, the pin says ${pin.version}`);
 
     // 2. Pre-seed. InstallSettings only adds missing keys, so these win.
-    mkdirSync(userData, { recursive: true });
+    mkdirConfined(userData);
     rmSync(tmp, { recursive: true, force: true });
-    mkdirSync(tmp, { recursive: true });
+    mkdirConfined(tmp);
     const settingsPath = join(root, "settings.json");
     const env = upstreamEnv(root, userData, tmp);
-    const snapshotPath = join(root, "LIFEOS", "MEMORY", "STATE", "settings-merge-snapshot.json");
+    const snapshotPath = join(root, SNAPSHOT);
     if (installed && existsSync(snapshotPath)) {
       // Fold hand edits made since the last merge into the user layer before anything rewrites
       // settings.json -- the same backport upstream's SessionStart hook runs. First, so that a
@@ -611,7 +633,7 @@ function main(): number {
     // A merge snapshot equal to the converted settings.json: hand edits made from here on are
     // drift that upstream's SessionStart backport carries into the user layer. Without one the
     // backport skips and the first rebuild after an upgrade drops those edits.
-    mkdirSync(dirname(snapshotPath), { recursive: true });
+    mkdirConfined(dirname(snapshotPath));
     writeJson(snapshotPath, readJson(settingsPath));
     // Then the rebuild every session starts with, so settings.json already holds this release's
     // system layer merged with the user layer (not the previous release's merge until the first
